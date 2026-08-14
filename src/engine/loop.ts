@@ -44,6 +44,7 @@ export async function runLoop(args: {
 
     const response = await adapter.complete({ system, messages, tools, signal });
     onEvent?.({ type: 'assistant', detail: response.text });
+    if (response.usage) onEvent?.({ type: 'usage', detail: response.usage });
 
     if (response.toolCalls.length === 0) {
       return { report: response.text, turns: turn + 1, budgetExceeded };

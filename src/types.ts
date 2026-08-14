@@ -22,7 +22,14 @@ export interface LlmMessage {
 export interface LlmCompleteResult {
   text: string;
   toolCalls: LlmToolCall[];
-  usage?: { inputTokens: number; outputTokens: number };
+  usage?: {
+    inputTokens: number;
+    outputTokens: number;
+    /** Tokens written to the prompt cache this turn (first time a prefix is seen). */
+    cacheWriteTokens?: number;
+    /** Tokens served from the prompt cache this turn (cheap re-reads of a cached prefix). */
+    cacheReadTokens?: number;
+  };
 }
 
 export interface ProviderAdapter {

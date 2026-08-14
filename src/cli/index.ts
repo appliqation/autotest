@@ -63,6 +63,14 @@ program
             console.error(`[tool] ${d.name} -> ${d.result.slice(0, 200)}`);
           } else if (e.type === 'log') {
             console.error(`[log] ${e.detail}`);
+          } else if (e.type === 'usage') {
+            const u = e.detail as { inputTokens: number; outputTokens: number; cacheWriteTokens?: number; cacheReadTokens?: number };
+            const cacheNote = u.cacheReadTokens
+              ? ` (${u.cacheReadTokens} from cache)`
+              : u.cacheWriteTokens
+                ? ` (${u.cacheWriteTokens} written to cache)`
+                : '';
+            console.error(`[usage] in=${u.inputTokens} out=${u.outputTokens}${cacheNote}`);
           }
         },
       });

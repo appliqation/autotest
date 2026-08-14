@@ -3,6 +3,15 @@ import type { LlmCompleteResult, LlmMessage, ProviderAdapter } from '../types.js
 
 const MODEL = 'claude-sonnet-5';
 
+// Prompt caching (see budget.md / the session that added this): the
+// workflow's system prompt and the tool-definition list are static across
+// every turn of the loop, and identical across every step of a test case —
+// prime candidates for Anthropic's ephemeral cache. The growing message
+// history is also incrementally cached: each turn adds a breakpoint on the
+// last block, so only the newly-added content since the previous turn is
+// charged at full price; everything before it is a cache read.
+const CACHE_CONTROL: Anthropic.CacheControlEphemeral = { type: 'ephemeral' };
+
 function toAnthropicMessages(messages: LlmMessage[]): Anthropic.MessageParam[] {
   const out: Anthropic.MessageParam[] = [];
   for (const m of messages) {
@@ -22,6 +31,16 @@ function toAnthropicMessages(messages: LlmMessage[]): Anthropic.MessageParam[] {
       });
     }
   }
+
+  // Mark the last block of the last message as a cache breakpoint, so the
+  // whole prefix built up so far (everything before this turn's new
+  // content) is served from cache on the next call instead of re-billed.
+  const last = out[out.length - 1];
+  if (last && Array.isArray(last.content) && last.content.length > 0) {
+    const lastBlock = last.content[last.content.length - 1];
+    (lastBlock as { cache_control?: Anthropic.CacheControlEphemeral }).cache_control = CACHE_CONTROL;
+  }
+
   return out;
 }
 
@@ -34,13 +53,16 @@ export function createAnthropicAdapter(apiKey: string): ProviderAdapter {
         {
           model: MODEL,
           max_tokens: 4096,
-          system,
+          system: [{ type: 'text', text: system, cache_control: CACHE_CONTROL }],
           messages: toAnthropicMessages(messages),
           tools: tools.map(
-            (t): Anthropic.Tool => ({
+            (t, i): Anthropic.Tool => ({
               name: t.name,
               description: t.description,
               input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
+              // Cache breakpoint on the last tool def caches the whole
+              // (static, rarely-changing) tools array as one prefix.
+              ...(i === tools.length - 1 ? { cache_control: CACHE_CONTROL } : {}),
             }),
           ),
         },
@@ -60,7 +82,12 @@ export function createAnthropicAdapter(apiKey: string): ProviderAdapter {
         text,
         toolCalls,
         usage: response.usage
-          ? { inputTokens: response.usage.input_tokens, outputTokens: response.usage.output_tokens }
+          ? {
+              inputTokens: response.usage.input_tokens,
+              outputTokens: response.usage.output_tokens,
+              cacheWriteTokens: response.usage.cache_creation_input_tokens ?? undefined,
+              cacheReadTokens: response.usage.cache_read_input_tokens ?? undefined,
+            }
           : undefined,
       };
     },
