@@ -15,7 +15,6 @@ export const config = {
   appqApiKey: () => required('APPQ_API_KEY'),
   anthropicApiKey: optional('ANTHROPIC_API_KEY'),
   openaiApiKey: optional('OPENAI_API_KEY'),
-  useLocalStub: (optional('USE_LOCAL_STUB') ?? 'true') === 'true',
   budget: {
     maxCalls: Number(optional('BUDGET_MAX_CALLS') ?? 50),
     maxPages: Number(optional('BUDGET_MAX_PAGES') ?? 12),

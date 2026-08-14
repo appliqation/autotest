@@ -6,9 +6,8 @@
 import type { ToolResult } from '../types.js';
 
 // Read-only appq MCP tools — safe for both the executor and validator stages.
-// New tools this repo depends on but appq hasn't shipped yet
-// (get_automation_readiness) are included here in anticipation of Phase 3;
-// until then they're served by appq/localStub.ts, not the real appq.
+// get_automation_readiness/get_execution_evidence landed for real on appq's
+// appq/autotest-mcp-tools branch (no local stub needed — see appq/mcpClient.ts).
 export const READONLY_APPQ_TOOLS = new Set([
   'get_accessibility_report',
   'get_analytics',
@@ -21,11 +20,12 @@ export const READONLY_APPQ_TOOLS = new Set([
   'get_project_test_data',
   'get_quality_context',
   'get_run_evidence',
+  'get_execution_evidence',
   'get_scenario',
   'get_test_results',
   'get_test_set',
   'get_validation_targets',
-  'get_automation_readiness', // new tool, appq-side addition #2 — local stub until Phase 3
+  'get_automation_readiness',
   'list_projects',
   'list_scenarios',
   'list_test_sets',
@@ -34,7 +34,7 @@ export const READONLY_APPQ_TOOLS = new Set([
 ]);
 
 // The one write tool the executor stage may call: observational only, never
-// a verdict. New appq-side tool (addition #5) — local stub until Phase 3.
+// a verdict.
 export const EXECUTOR_WRITE_TOOL = 'submit_execution_evidence';
 
 // Verdict-bearing / mutating tools. Reachable only from the validator stage's

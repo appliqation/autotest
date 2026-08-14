@@ -5,6 +5,7 @@
 
 import type { LlmToolDef, ToolResult } from '../types.js';
 import { callTool, listTools } from '../appq/mcpClient.js';
+import { assertToolAllowed } from './safety.js';
 
 export async function fetchAppqToolDefs(allowlist: Set<string>): Promise<LlmToolDef[]> {
   const all = await listTools();
@@ -16,4 +17,18 @@ export async function fetchAppqToolDefs(allowlist: Set<string>): Promise<LlmTool
 export async function dispatchAppqTool(name: string, args: Record<string, unknown>): Promise<ToolResult> {
   const outcome = await callTool(name, args);
   return { ok: outcome.ok, text: outcome.text, data: outcome.raw };
+}
+
+/**
+ * Wraps dispatchAppqTool with a hard allowlist check — the actual
+ * enforcement point for "The one hardcoded client-side invariant" (see the
+ * plan doc). fetchAppqToolDefs() only controls what's *offered* to the
+ * model; this is what stops a call that shouldn't happen from *executing*,
+ * regardless of what the model attempts or what a served prompt says.
+ */
+export function createGatedAppqDispatcher(allowlist: Set<string>): (name: string, args: Record<string, unknown>) => Promise<ToolResult> {
+  return async (name, args) => {
+    assertToolAllowed(name, allowlist);
+    return dispatchAppqTool(name, args);
+  };
 }
