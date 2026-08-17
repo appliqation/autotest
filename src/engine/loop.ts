@@ -7,8 +7,6 @@
 import type { LlmMessage, LlmToolDef, ProviderAdapter, RunBudget, ToolDispatcher } from '../types.js';
 import { BudgetTracker } from './budget.js';
 
-const MAX_MODEL_TURNS = 80;
-
 export interface LoopResult {
   report: string;
   turns: number;
@@ -30,7 +28,7 @@ export async function runLoop(args: {
   const messages: LlmMessage[] = [{ role: 'user', content: args.seedMessage }];
   let budgetExceeded = false;
 
-  for (let turn = 0; turn < MAX_MODEL_TURNS; turn++) {
+  for (let turn = 0; turn < budget.maxTurns; turn++) {
     if (signal?.aborted) throw new Error('Run aborted');
 
     const cap = tracker.exceeded();
@@ -79,5 +77,5 @@ export async function runLoop(args: {
   onEvent?.({ type: 'log', detail: 'Reached max turns; requesting final report.' });
   messages.push({ role: 'user', content: 'Produce your final report now, without calling any tool.' });
   const final = await adapter.complete({ system, messages, tools: [], signal });
-  return { report: final.text, turns: MAX_MODEL_TURNS, budgetExceeded: true };
+  return { report: final.text, turns: budget.maxTurns, budgetExceeded: true };
 }

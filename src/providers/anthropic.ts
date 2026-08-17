@@ -1,7 +1,7 @@
 import Anthropic from '@anthropic-ai/sdk';
 import type { LlmCompleteResult, LlmMessage, ProviderAdapter } from '../types.js';
 
-const MODEL = 'claude-sonnet-5';
+export const DEFAULT_ANTHROPIC_MODEL = 'claude-sonnet-5';
 
 // Prompt caching (see budget.md / the session that added this): the
 // workflow's system prompt and the tool-definition list are static across
@@ -75,15 +75,19 @@ function toAnthropicMessages(messages: LlmMessage[]): Anthropic.MessageParam[] {
   return out;
 }
 
-export function createAnthropicAdapter(apiKey: string): ProviderAdapter {
+export function createAnthropicAdapter(
+  apiKey: string,
+  model: string = DEFAULT_ANTHROPIC_MODEL,
+  maxTokens = 4096,
+): ProviderAdapter {
   const client = new Anthropic({ apiKey });
 
   return {
     async complete({ system, messages, tools, signal }): Promise<LlmCompleteResult> {
       const response = await client.messages.create(
         {
-          model: MODEL,
-          max_tokens: 4096,
+          model,
+          max_tokens: maxTokens,
           system: [{ type: 'text', text: system, cache_control: CACHE_CONTROL }],
           messages: toAnthropicMessages(messages),
           tools: tools.map(

@@ -17,10 +17,21 @@ export interface JudgeTcOptions {
   runId: string;
   testCaseUuid: string;
   url: string;
-  adapter: ProviderAdapter;
+  /**
+   * Deliberately separate adapters, not one shared instance — see
+   * config/env.ts's resolveModel(): the validator's judgment is closer to
+   * bounded classification than the executor's open-ended planning, a
+   * reasonable place for a cheaper/different model, and a genuinely
+   * different model is one more decorrelation lever against same-model
+   * self-grading risk. Pass the same adapter for both if that split isn't
+   * wanted for a given run.
+   */
+  executorAdapter: ProviderAdapter;
+  validatorAdapter: ProviderAdapter;
   budget: RunBudget;
   mandatoryImageCheck: boolean;
   dryRun: boolean;
+  ringBufferCap?: number;
   onEvent?: (stage: 'executor' | 'validator', event: { type: string; detail?: unknown }) => void;
 }
 
@@ -30,14 +41,14 @@ export interface JudgeTcResult {
 }
 
 export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
-  const { runId, testCaseUuid, url, adapter, budget, mandatoryImageCheck, dryRun, onEvent } = opts;
+  const { runId, testCaseUuid, url, executorAdapter, validatorAdapter, budget, mandatoryImageCheck, dryRun, ringBufferCap, onEvent } = opts;
 
   // Stage 1: executor. Drives a real browser; may write only evidence.
   const browser = await chromium.launch();
   const page = await browser.newPage();
   let executorResult: LoopResult;
   try {
-    const browserTools = new PlaywrightBrowserTools(page);
+    const browserTools = new PlaywrightBrowserTools(page, ringBufferCap);
     const executorToolDefs = await fetchAppqToolDefs(executorAllowedAppqTools());
     const gatedExecutorAppq = createGatedAppqDispatcher(executorAllowedAppqTools());
     const executorDispatch: ToolDispatcher = async (name, args) => {
@@ -50,7 +61,7 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
       seedMessage: `Run: ${runId}\nTest case: ${testCaseUuid}\nURL under test: ${url}\nBegin now — start with get_scenario.`,
       tools: [...BROWSER_TOOL_DEFS, ...executorToolDefs],
       dispatch: executorDispatch,
-      adapter,
+      adapter: executorAdapter,
       budget,
       onEvent: (e) => onEvent?.('executor', e),
     });
@@ -75,7 +86,7 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
     seedMessage: `Run: ${runId}\nTest case: ${testCaseUuid}\nBegin now — start with get_scenario.`,
     tools: [...validatorToolDefs, ...screenshotViewer.toolDefs()],
     dispatch,
-    adapter,
+    adapter: validatorAdapter,
     budget,
     onEvent: (e) => onEvent?.('validator', e),
   });

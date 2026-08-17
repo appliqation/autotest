@@ -94,8 +94,11 @@ export class PlaywrightBrowserTools {
   private knownRefs = new Set<string>();
   readonly evidence: EvidenceCapture;
 
-  constructor(private readonly page: Page) {
-    this.evidence = new EvidenceCapture(page);
+  constructor(
+    private readonly page: Page,
+    ringBufferCap?: number,
+  ) {
+    this.evidence = new EvidenceCapture(page, ringBufferCap);
   }
 
   private locatorFor(ref: string) {

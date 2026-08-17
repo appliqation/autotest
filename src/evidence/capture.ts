@@ -30,7 +30,7 @@ export interface StepEvidence {
   blocked?: { reason: string };
 }
 
-const RING_BUFFER_CAP = 500;
+export const DEFAULT_RING_BUFFER_CAP = 500;
 
 export class EvidenceCapture {
   private console: ConsoleEntry[] = [];
@@ -39,7 +39,10 @@ export class EvidenceCapture {
   private consoleCursor = 0;
   private networkCursor = 0;
 
-  constructor(private readonly page: Page) {
+  constructor(
+    private readonly page: Page,
+    private readonly ringBufferCap: number = DEFAULT_RING_BUFFER_CAP,
+  ) {
     page.on('console', (msg) => {
       this.push(this.console, { type: msg.type(), text: msg.text(), timestamp: Date.now() });
     });
@@ -59,7 +62,7 @@ export class EvidenceCapture {
 
   private push<T>(arr: T[], entry: T): void {
     arr.push(entry);
-    if (arr.length > RING_BUFFER_CAP) arr.shift();
+    if (arr.length > this.ringBufferCap) arr.shift();
   }
 
   /** Captures a step's evidence bundle: screenshot + a11y snapshot + deltas since the last step. */

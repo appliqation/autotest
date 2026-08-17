@@ -9,7 +9,7 @@
 
 import { Command } from 'commander';
 import { chromium } from 'playwright';
-import { config, resolveProvider } from '../config/env.js';
+import { config, resolveProvider, resolveModel } from '../config/env.js';
 import { createAnthropicAdapter } from '../providers/anthropic.js';
 import { createOpenAiAdapter } from '../providers/openai.js';
 import { PlaywrightBrowserTools, BROWSER_TOOL_DEFS } from '../tools/browserTools.js';
@@ -23,11 +23,13 @@ import { pollTestResults } from '../orchestrator/pollResults.js';
 import type { LoopResult } from '../engine/loop.js';
 import type { ProviderAdapter, ToolDispatcher } from '../types.js';
 
-function buildAdapter(): ProviderAdapter {
+/** Builds the adapter for a given role — see resolveModel() for why executor/validator can differ. */
+function buildAdapter(role: 'executor' | 'validator'): ProviderAdapter {
   const provider = resolveProvider();
+  const model = resolveModel(role);
   return provider === 'anthropic'
-    ? createAnthropicAdapter(config.anthropicApiKey!)
-    : createOpenAiAdapter(config.openaiApiKey!);
+    ? createAnthropicAdapter(config.anthropicApiKey!, model, config.anthropicMaxTokens)
+    : createOpenAiAdapter(config.openaiApiKey!, model, config.openaiMaxOutputTokens);
 }
 
 function logEvent(prefix: string) {
@@ -100,12 +102,15 @@ program
   .option('--project-id <id>', 'appq project id, passed through to the runman prompt')
   .option('--prompt <text>', 'what to test/explore', 'Explore this page like a senior QA lead.')
   .action(async (opts: { url: string; projectId?: string; prompt: string }) => {
-    const adapter = buildAdapter();
+    // Same shape of task as the executor role (open-ended browser-driven
+    // exploration) — reuse its model resolution rather than inventing a
+    // third role.
+    const adapter = buildAdapter('executor');
     const browser = await chromium.launch();
     const page = await browser.newPage();
 
     try {
-      const browserTools = new PlaywrightBrowserTools(page);
+      const browserTools = new PlaywrightBrowserTools(page, config.evidenceRingBufferCap);
       const appqToolDefs = await fetchAppqToolDefs(READONLY_APPQ_TOOLS);
       const gatedAppq = createGatedAppqDispatcher(READONLY_APPQ_TOOLS);
 
@@ -154,7 +159,8 @@ program
       mandatoryImageCheck?: boolean;
       dryRun?: boolean;
     }) => {
-      const adapter = buildAdapter();
+      const executorAdapter = buildAdapter('executor');
+      const validatorAdapter = buildAdapter('validator');
       const runId = await resolveRun(opts);
       const mandatoryImageCheck = opts.mandatoryImageCheck ?? config.mandatoryImageCheck;
       const dryRun = opts.dryRun ?? false;
@@ -166,10 +172,12 @@ program
         runId,
         testCaseUuid: opts.testCaseUuid,
         url: opts.url,
-        adapter,
+        executorAdapter,
+        validatorAdapter,
         budget: config.budget,
         mandatoryImageCheck,
         dryRun,
+        ringBufferCap: config.evidenceRingBufferCap,
         onEvent: (stage, e) => logEvent(`[${stage}] `)(e),
       });
 
@@ -197,7 +205,10 @@ program
       'is never hardcoded. Defaults to on-script-absence: a conservative bootstrap choice, not a product stance.',
     'on-script-absence',
   )
-  .option('--poll-timeout-ms <ms>', 'how long to wait for the deterministic path to settle before reporting', '120000')
+  .option(
+    '--poll-timeout-ms <ms>',
+    'how long to wait for the deterministic path to settle before reporting. Defaults to POLL_TIMEOUT_MS.',
+  )
   .option(...MANDATORY_IMAGE_OPTION)
   .option(...DRY_RUN_OPTION)
   .action(
@@ -207,16 +218,18 @@ program
       url: string;
       runId?: string;
       coverage: string;
-      pollTimeoutMs: string;
+      pollTimeoutMs?: string;
       mandatoryImageCheck?: boolean;
       dryRun?: boolean;
     }) => {
-      const adapter = buildAdapter();
+      const executorAdapter = buildAdapter('executor');
+      const validatorAdapter = buildAdapter('validator');
       const scenarioId = Number(opts.scenarioId);
       const projectId = Number(opts.projectId);
       const policy = parseCoveragePolicy(opts.coverage);
       const mandatoryImageCheck = opts.mandatoryImageCheck ?? config.mandatoryImageCheck;
       const dryRun = opts.dryRun ?? false;
+      const pollTimeoutMs = opts.pollTimeoutMs ? Number(opts.pollTimeoutMs) : config.pollTimeoutMs;
 
       const runId = await resolveRun({ runId: opts.runId, scenarioId: opts.scenarioId, projectId: opts.projectId });
       console.error(
@@ -257,10 +270,12 @@ program
             runId,
             testCaseUuid: tcUuid,
             url: opts.url,
-            adapter,
+            executorAdapter,
+            validatorAdapter,
             budget: config.budget,
             mandatoryImageCheck,
             dryRun,
+            ringBufferCap: config.evidenceRingBufferCap,
             onEvent: (stage, e) => logEvent(`[${tcUuid}:${stage}] `)(e),
           });
           console.error(`[${tcUuid}] validator finished (${validatorResult.turns} turns)`);
@@ -273,7 +288,7 @@ program
       // deterministic-only results AND the agentic pair's own writeback
       // (the validator calls update_run_results itself, as its last phase)
       // both show up, so a single poll pass covers every TC either way.
-      console.error(`\n[report] polling get_test_results (up to ${opts.pollTimeoutMs}ms)...`);
+      console.error(`\n[report] polling get_test_results (up to ${pollTimeoutMs}ms)...`);
       const allUuids = new Set(readiness.map((r) => r.test_case_uuid));
       const results = dryRun
         ? new Map() // nothing was actually written in dry-run mode — nothing to poll for
@@ -281,7 +296,8 @@ program
             runId,
             scenarioId,
             wantUuids: allUuids,
-            timeoutMs: Number(opts.pollTimeoutMs),
+            timeoutMs: pollTimeoutMs,
+            intervalMs: config.pollIntervalMs,
           });
 
       console.log(`\n=== Run ${runId} — scenario ${scenarioId} ===\n`);

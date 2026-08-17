@@ -1,4 +1,6 @@
 import 'dotenv/config';
+import { DEFAULT_ANTHROPIC_MODEL } from '../providers/anthropic.js';
+import { DEFAULT_OPENAI_MODEL } from '../providers/openai.js';
 
 function required(name: string): string {
   const value = process.env[name];
@@ -27,11 +29,46 @@ export const config = {
     maxCalls: Number(optional('BUDGET_MAX_CALLS') ?? 50),
     maxPages: Number(optional('BUDGET_MAX_PAGES') ?? 12),
     maxMillis: Number(optional('BUDGET_MAX_MILLIS') ?? 15 * 60 * 1000),
+    maxTurns: Number(optional('BUDGET_MAX_TURNS') ?? 80),
   },
+  // Response length cap, provider-specific param names (Anthropic:
+  // max_tokens, OpenAI: max_output_tokens) — same reasoning as splitting
+  // models by role/provider: don't collapse genuinely different knobs into
+  // one setting just because they're conceptually similar.
+  anthropicMaxTokens: Number(optional('ANTHROPIC_MAX_TOKENS') ?? 4096),
+  openaiMaxOutputTokens: Number(optional('OPENAI_MAX_OUTPUT_TOKENS') ?? 4096),
+  evidenceRingBufferCap: Number(optional('EVIDENCE_RING_BUFFER_CAP') ?? 500),
+  pollIntervalMs: Number(optional('POLL_INTERVAL_MS') ?? 5000),
+  pollTimeoutMs: Number(optional('POLL_TIMEOUT_MS') ?? 120000),
 };
 
 export function resolveProvider(): 'anthropic' | 'openai' {
   if (config.anthropicApiKey) return 'anthropic';
   if (config.openaiApiKey) return 'openai';
   throw new Error('Set ANTHROPIC_API_KEY or OPENAI_API_KEY');
+}
+
+/**
+ * Resolves which model to use for a given role. Role-specific overrides
+ * (*_EXECUTOR_MODEL / *_VALIDATOR_MODEL) take precedence over the blanket
+ * *_MODEL override, which takes precedence over the provider's own default.
+ *
+ * Split by role deliberately, not just a single global override: judging
+ * captured evidence against a known expected_result (the validator) is
+ * closer to bounded classification than the open-ended planning driving a
+ * browser needs (the executor) — a cheaper/faster model is a reasonable
+ * fit for the former specifically, and a genuinely different model is one
+ * more decorrelation lever against same-model self-grading risk. See the
+ * plan/session notes on this. A blanket *_MODEL override (e.g. for cheap
+ * end-to-end testing before trusting this against a real project) still
+ * works — it's just the fallback both roles share unless overridden.
+ */
+export function resolveModel(role: 'executor' | 'validator'): string {
+  const provider = resolveProvider();
+  if (provider === 'anthropic') {
+    const roleOverride = optional(role === 'executor' ? 'ANTHROPIC_EXECUTOR_MODEL' : 'ANTHROPIC_VALIDATOR_MODEL');
+    return roleOverride ?? optional('ANTHROPIC_MODEL') ?? DEFAULT_ANTHROPIC_MODEL;
+  }
+  const roleOverride = optional(role === 'executor' ? 'OPENAI_EXECUTOR_MODEL' : 'OPENAI_VALIDATOR_MODEL');
+  return roleOverride ?? optional('OPENAI_MODEL') ?? DEFAULT_OPENAI_MODEL;
 }

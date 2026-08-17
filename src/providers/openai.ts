@@ -1,7 +1,7 @@
 import OpenAI from 'openai';
 import type { LlmCompleteResult, LlmMessage, ProviderAdapter } from '../types.js';
 
-const MODEL = 'gpt-5';
+export const DEFAULT_OPENAI_MODEL = 'gpt-5';
 
 function toResponsesInput(messages: LlmMessage[]): OpenAI.Responses.ResponseInputItem[] {
   const out: OpenAI.Responses.ResponseInputItem[] = [];
@@ -43,14 +43,19 @@ function toResponsesInput(messages: LlmMessage[]): OpenAI.Responses.ResponseInpu
   return out;
 }
 
-export function createOpenAiAdapter(apiKey: string): ProviderAdapter {
+export function createOpenAiAdapter(
+  apiKey: string,
+  model: string = DEFAULT_OPENAI_MODEL,
+  maxOutputTokens = 4096,
+): ProviderAdapter {
   const client = new OpenAI({ apiKey });
 
   return {
     async complete({ system, messages, tools, signal }): Promise<LlmCompleteResult> {
       const response = await client.responses.create(
         {
-          model: MODEL,
+          model,
+          max_output_tokens: maxOutputTokens,
           instructions: system,
           input: toResponsesInput(messages),
           tools: tools.map((t) => ({

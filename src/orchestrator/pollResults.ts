@@ -8,6 +8,8 @@
 
 import { callTool } from '../appq/mcpClient.js';
 
+export const DEFAULT_POLL_INTERVAL_MS = 5000;
+
 export interface TcResult {
   uuid: string;
   status: string | null;
@@ -21,7 +23,7 @@ export async function pollTestResults(args: {
   timeoutMs: number;
   intervalMs?: number;
 }): Promise<Map<string, TcResult>> {
-  const interval = args.intervalMs ?? 5000;
+  const interval = args.intervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const deadline = Date.now() + args.timeoutMs;
   const found = new Map<string, TcResult>();
 

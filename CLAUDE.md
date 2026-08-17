@@ -33,8 +33,16 @@ the real origin now, not Lando. What's still unverified is this repo's own code:
 (Phase 2, one TC) and `run` (Phase 5, whole scenario + coverage policy + `--dry-run`) are
 built and typecheck clean, but neither has executed against a real LLM + real browser —
 confirming the appq tools work is not the same as confirming this client's engine,
-Playwright driving, or image-viewing wiring actually work end to end. Needs
-`APPQ_API_KEY` + an LLM key, neither of which this session can supply.
+Playwright driving, or image-viewing wiring actually work end to end. `.env` now has real
+credentials (with Haiku set for both roles, to keep cost down for the first live runs).
+
+**Config philosophy:** avoid hardcoded values wherever a real choice exists — see
+`src/config/env.ts` and `.env.example` for the full surface (models per provider per
+role, max tokens, all budget caps, ring buffer size, poll interval/timeout). The one
+deliberate exception is `src/tools/safety.ts`: the destructive-action gate and the
+per-stage tool allowlists stay hardcoded on purpose — that's "the one hardcoded,
+non-negotiable invariant" the whole executor/validator safety model rests on, not an
+oversight to fix. Don't add a config knob for those.
 
 ## Where to find what
 
@@ -85,14 +93,19 @@ Playwright driving, or image-viewing wiring actually work end to end. Needs
   evidence isn't enough — most steps don't need it) or mandatory (every step's screenshot
   fetched and attached unconditionally, enforced in code before the model ever gets a
   turn — same reasoning as the destructive-action gate: don't rely on the model asking).
-- `src/providers/` — official `@anthropic-ai/sdk`/`openai` adapters. The Anthropic one
-  sets `cache_control` breakpoints (system prompt, tool defs, growing message history) —
-  see the plan/session notes on why: the workflow prompt and tool list are static and
-  reused across every turn and every TC, and the full history gets resent every turn
-  regardless, so caching is high-leverage here, not optional polish. Both adapters also
-  handle `LlmMessage.images` on tool results — Anthropic inline in the `tool_result`
-  block, OpenAI as a synthetic follow-up `input_image` message (the Responses API has no
-  way to attach an image to a function output directly).
+- `src/providers/` — official `@anthropic-ai/sdk`/`openai` adapters, model and max-tokens
+  passed in (`config/env.ts`'s `resolveModel(role)` — separate overrides per provider AND
+  per role, since judging captured evidence is closer to bounded classification than the
+  executor's open-ended browser-driving planning; a cheaper/different model is a
+  reasonable fit for the validator specifically, and a decorrelation lever against
+  same-model self-grading risk). The Anthropic adapter also sets `cache_control`
+  breakpoints (system prompt, tool defs, growing message history) — see the plan/session
+  notes on why: the workflow prompt and tool list are static and reused across every turn
+  and every TC, and the full history gets resent every turn regardless, so caching is
+  high-leverage here, not optional polish. Both adapters also handle `LlmMessage.images`
+  on tool results — Anthropic inline in the `tool_result` block, OpenAI as a synthetic
+  follow-up `input_image` message (the Responses API has no way to attach an image to a
+  function output directly).
 - `src/tools/dryRun.ts` — `--dry-run`'s enforcement point: intercepts
   `update_run_results`/`create_defect` calls and logs what would have been sent instead of
   sending it. A dispatch-level intercept, not a prompt instruction, same reasoning as the

@@ -67,6 +67,8 @@ export interface RunBudget {
   maxCalls: number;
   maxPages: number;
   maxMillis: number;
+  /** Hard backstop on model turns, independent of the other caps — see engine/loop.ts. */
+  maxTurns: number;
 }
 
 // A tool dispatcher maps a tool-call name+args to a result. Different stages
