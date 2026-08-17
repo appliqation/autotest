@@ -24,21 +24,37 @@ called for local specs/stubs standing in for appq's tools; instead, the real
 were built directly on appq's `appq/autotest-mcp-tools` branch (isolated from the other
 feature in flight there), so there was never a stub to build or later swap out.
 
-**Current phase: Phase 2** — the two-stage executor/validator pattern is wired
-(`judge` command) against the real appq workflows, not yet run live end-to-end (needs
-`APPQ_API_KEY` + an LLM key — neither is something this session can supply). appq's
-`appq/autotest-mcp-tools` branch is local-only there too: not pushed, not merged, not
-deployed to the public origin — for local testing point `APPQ_ORIGIN` at the Lando
-instance running that branch (see `.env.example`), not `https://appq.appliqation.io`.
+**Current phase: Phase 5 code complete, nothing run live yet.** The appq side is done
+and verified: `appq:autotest-executor`/`-validator`/`autotest`, `get_automation_readiness`,
+`submit_execution_evidence`/`get_execution_evidence`, and the `blocked` status enum are
+all deployed to the real origin and confirmed working by direct MCP calls (PR #622,
+`appq/hotfix-autotest-mcp-tools`, merged to `appq/prod/iron`). `APPQ_ORIGIN` can point at
+the real origin now, not Lando. What's still unverified is this repo's own code: `judge`
+(Phase 2, one TC) and `run` (Phase 5, whole scenario + coverage policy + `--dry-run`) are
+built and typecheck clean, but neither has executed against a real LLM + real browser —
+confirming the appq tools work is not the same as confirming this client's engine,
+Playwright driving, or image-viewing wiring actually work end to end. Needs
+`APPQ_API_KEY` + an LLM key, neither of which this session can supply.
 
 ## Where to find what
 
 - `src/cli/` — CLI entrypoints. `runman` (Phase 1) proves the engine against the
-  existing, real `appq:runman` workflow. `judge` (Phase 2) runs a test case as two
+  existing, real `appq:runman` workflow. `judge` (Phase 2) runs one test case as two
   genuinely separate `runWorkflow()` invocations — `appq:autotest-executor` then
   `appq:autotest-validator` — with a plain, non-LLM-mediated `update_run_results`
-  `create_run` call in between if no `--run-id` is given. Still to come: a `run` command
-  (Phase 5, full-scenario router + coverage policy).
+  `create_run` call in between if no `--run-id` is given. `run` (Phase 5) applies the same
+  pattern across a whole scenario: fetches `get_automation_readiness` once, applies
+  `--coverage` per TC, calls `judgeTc()` (see `src/orchestrator/`) for the TCs that need
+  agentic coverage, then polls `get_test_results` once for the full TC list — that single
+  poll picks up both the deterministic pipeline's own results and whatever the validator
+  already wrote itself, so no special-casing is needed between the two paths.
+- `src/orchestrator/` — `judgeTc.ts` (the executor→validator pair for one TC, factored out
+  of `judge` so `run` doesn't duplicate it), `coveragePolicy.ts` (`always` /
+  `on-script-absence` / `sampled:N` / `external` — never hardcoded, see the plan's
+  "coverage decision"; `external` throws if selected without a decider function wired up —
+  a deliberate hook for a future orchestrating agent, not a silent fallback),
+  `pollResults.ts` (poll-until-settled against `get_test_results`, since the deterministic
+  path is SQS-driven with no blocking/webhook API).
 - `src/engine/` — the generic, workflow-agnostic core: `loop.ts` (think→act→observe),
   `budget.ts` (call/page/time caps), `workflowRunner.ts` (fetches a named appq workflow
   and runs it through the loop as one fresh-context invocation — the same function backs
@@ -77,6 +93,11 @@ instance running that branch (see `.env.example`), not `https://appq.appliqation
   handle `LlmMessage.images` on tool results — Anthropic inline in the `tool_result`
   block, OpenAI as a synthetic follow-up `input_image` message (the Responses API has no
   way to attach an image to a function output directly).
+- `src/tools/dryRun.ts` — `--dry-run`'s enforcement point: intercepts
+  `update_run_results`/`create_defect` calls and logs what would have been sent instead of
+  sending it. A dispatch-level intercept, not a prompt instruction, same reasoning as the
+  destructive-action gate — the validator's own workflow prose is what decides to write,
+  so "don't write" has to be enforced below that, not asked of it.
 
 ## Commands
 
@@ -84,15 +105,16 @@ instance running that branch (see `.env.example`), not `https://appq.appliqation
 - `npm run build` / `npm run typecheck`
 - `npx tsx src/cli/index.ts runman --url <target> --project-id <id>` — Phase 1 proof run
 - `npx tsx src/cli/index.ts judge --test-case-uuid <uuid> --url <target> --scenario-id <id> --project-id <id>`
-  — Phase 2 proof run (add `--run-id` to reuse an existing run instead of creating one)
+  — one TC (add `--run-id` to reuse an existing run, `--dry-run` to suppress writeback)
+- `npx tsx src/cli/index.ts run --scenario-id <id> --project-id <id> --url <target> [--coverage <policy>] [--dry-run]`
+  — a whole scenario, consolidated report across every TC
 
 ## Config
 
 Copy `.env.example` to `.env`. Requires `APPQ_API_KEY` and one of
-`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`. For local testing against appq's
-`appq/autotest-mcp-tools` branch (pre-merge), set `APPQ_ORIGIN` to the local Lando
-instance, not the public origin — see the comment in `.env.example` for the TLS caveat
-that comes with that (self-signed cert).
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY`. `APPQ_ORIGIN` can point at the real origin now that
+the appq-side tools are deployed there — only fall back to a local Lando instance if
+testing against appq changes that haven't landed on `prod/iron` yet.
 
 ## Keeping this file current
 
