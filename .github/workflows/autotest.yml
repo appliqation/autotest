@@ -1,0 +1,54 @@
+name: Autotest
+
+# Example CI wiring, not a prescribed policy. Runs a full-scenario autotest
+# pass against a PR and fails the check if any test case comes back failed,
+# blocked, or never settles. `--dry-run` is on by default here on purpose —
+# per the plan, an LLM-driven process writing pass/fail with zero human in
+# the loop is not something to trust blind on day one. Drop --dry-run once
+# you've watched this against your own project for a while.
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  autotest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+      # Only Chromium is used by this repo's browser tools — no need to
+      # install Firefox/WebKit.
+      - run: npx playwright install --with-deps chromium
+
+      - name: Run autotest
+        env:
+          APPQ_ORIGIN: https://appq.appliqation.io
+          # Dedicated CI service-account key, scoped tightly to this
+          # project's membership only — see appq_vibe_api's vibe-api-key
+          # admin UI. Do not reuse a personal key here.
+          APPQ_API_KEY: ${{ secrets.AUTOTEST_APPQ_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.AUTOTEST_ANTHROPIC_API_KEY }}
+          # Cheaper/faster model for CI runs; override per-role if the
+          # executor needs more capability than the validator does.
+          ANTHROPIC_MODEL: claude-haiku-4-5-20251001
+        run: |
+          npx tsx src/cli/index.ts run \
+            --scenario-id "${{ vars.AUTOTEST_SCENARIO_ID }}" \
+            --project-id "${{ vars.AUTOTEST_PROJECT_ID }}" \
+            --url "${{ vars.AUTOTEST_TARGET_URL }}" \
+            --environment "${{ vars.AUTOTEST_ENVIRONMENT }}" \
+            --dry-run --ci \
+            > autotest-result.json
+
+      - name: Upload result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: autotest-result
+          path: autotest-result.json

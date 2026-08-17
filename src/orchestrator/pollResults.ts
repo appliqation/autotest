@@ -18,7 +18,9 @@ export interface TcResult {
 
 export async function pollTestResults(args: {
   runId: string;
-  scenarioId: number;
+  // Optional — `judge` may reuse a run created elsewhere (via --run-id with
+  // no --scenario-id), and get_test_results works fine keyed by run_id alone.
+  scenarioId?: number;
   wantUuids: Set<string>;
   timeoutMs: number;
   intervalMs?: number;
@@ -28,7 +30,10 @@ export async function pollTestResults(args: {
   const found = new Map<string, TcResult>();
 
   while (Date.now() < deadline) {
-    const result = await callTool('get_test_results', { run_id: args.runId, scenario_id: args.scenarioId });
+    const result = await callTool('get_test_results', {
+      run_id: args.runId,
+      ...(args.scenarioId ? { scenario_id: args.scenarioId } : {}),
+    });
     if (result.ok) {
       try {
         const parsed = JSON.parse(result.text) as { results?: Array<{ uuid: string; status: string; error_message?: string }> };

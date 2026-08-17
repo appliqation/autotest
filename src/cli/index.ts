@@ -20,6 +20,8 @@ import { runWorkflow } from '../engine/workflowRunner.js';
 import { judgeTc } from '../orchestrator/judgeTc.js';
 import { parseCoveragePolicy, shouldRunAgenticCoverage } from '../orchestrator/coveragePolicy.js';
 import { pollTestResults } from '../orchestrator/pollResults.js';
+import { printJsonSummary, printHumanSummary, exitCodeFor } from './output.js';
+import type { TcOutcome } from './output.js';
 import type { LoopResult } from '../engine/loop.js';
 import type { ProviderAdapter, ToolDispatcher } from '../types.js';
 
@@ -86,6 +88,19 @@ const DRY_RUN_OPTION = [
   'Compute verdicts normally but suppress the actual update_run_results/create_defect calls — logs what would ' +
     'have been written instead. Recommended default for the first runs against any project, per the plan: an ' +
     "LLM-driven process writing pass/fail with zero human in the loop is not something to trust blind on day one.",
+] as const;
+
+const JSON_OPTION = [
+  '--json',
+  'Print the final result as a single JSON object on stdout instead of a human-readable table. Progress logs ' +
+    'still go to stderr either way, so stdout stays clean for piping/parsing.',
+] as const;
+
+const CI_OPTION = [
+  '--ci',
+  'Shorthand for --json. Exit code already reflects the real outcome regardless of this flag — non-zero ' +
+    'whenever a non-dry-run test case is failed, blocked, or never settled by the poll timeout — --ci just ' +
+    'switches the final summary to JSON on top of that.',
 ] as const;
 
 const program = new Command();
@@ -155,6 +170,8 @@ program
   )
   .option(...MANDATORY_IMAGE_OPTION)
   .option(...DRY_RUN_OPTION)
+  .option(...JSON_OPTION)
+  .option(...CI_OPTION)
   .action(
     async (opts: {
       testCaseUuid: string;
@@ -165,7 +182,10 @@ program
       environment?: string;
       mandatoryImageCheck?: boolean;
       dryRun?: boolean;
+      json?: boolean;
+      ci?: boolean;
     }) => {
+      const json = (opts.json ?? false) || (opts.ci ?? false);
       const executorAdapter = buildAdapter('executor');
       const validatorAdapter = buildAdapter('validator');
       const runId = await resolveRun(opts);
@@ -188,9 +208,35 @@ program
         onEvent: (stage, e) => logEvent(`[${stage}] `)(e),
       });
 
-      printResult('Executor report', executorResult);
-      printResult('Validator report', validatorResult);
-      console.error(`\nRun: ${runId}  Test case: ${opts.testCaseUuid}`);
+      if (!json) {
+        printResult('Executor report', executorResult);
+        printResult('Validator report', validatorResult);
+      }
+
+      // The validator writes its own verdict via update_run_results as its
+      // last phase — poll appq's own run matrix for the authoritative status
+      // rather than trying to parse it back out of the report prose.
+      let status = 'dry-run';
+      let errorMessage: string | undefined;
+      if (!dryRun) {
+        const polled = await pollTestResults({
+          runId,
+          scenarioId: opts.scenarioId ? Number(opts.scenarioId) : undefined,
+          wantUuids: new Set([opts.testCaseUuid]),
+          timeoutMs: config.pollTimeoutMs,
+          intervalMs: config.pollIntervalMs,
+        });
+        const tc = polled.get(opts.testCaseUuid);
+        status = tc?.status ?? 'pending';
+        errorMessage = tc?.errorMessage;
+      }
+
+      const outcome: TcOutcome = { testCaseUuid: opts.testCaseUuid, path: 'agentic', status, errorMessage };
+      const summary = { runId, dryRun, results: [outcome] };
+      if (json) printJsonSummary(summary);
+      else printHumanSummary(summary);
+
+      process.exitCode = exitCodeFor(summary);
     },
   );
 
@@ -223,6 +269,8 @@ program
   )
   .option(...MANDATORY_IMAGE_OPTION)
   .option(...DRY_RUN_OPTION)
+  .option(...JSON_OPTION)
+  .option(...CI_OPTION)
   .action(
     async (opts: {
       scenarioId: string;
@@ -234,7 +282,10 @@ program
       pollTimeoutMs?: string;
       mandatoryImageCheck?: boolean;
       dryRun?: boolean;
+      json?: boolean;
+      ci?: boolean;
     }) => {
+      const json = (opts.json ?? false) || (opts.ci ?? false);
       const executorAdapter = buildAdapter('executor');
       const validatorAdapter = buildAdapter('validator');
       const scenarioId = Number(opts.scenarioId);
@@ -318,22 +369,26 @@ program
             intervalMs: config.pollIntervalMs,
           });
 
-      console.log(`\n=== Run ${runId} — scenario ${scenarioId} ===\n`);
-      for (const tc of readiness) {
-        const path = covered.includes(tc.test_case_uuid)
+      const outcomes: TcOutcome[] = readiness.map((tc) => {
+        const path: TcOutcome['path'] = covered.includes(tc.test_case_uuid)
           ? tc.has_canonical_script
             ? 'canonical script + agentic'
             : 'agentic'
           : 'canonical script';
         const result = results.get(tc.test_case_uuid);
-        const status = dryRun ? 'DRY-RUN (not written)' : result ? result.status : 'PENDING (poll timeout)';
-        console.log(`  ${tc.test_case_uuid}  [${path}]  ${status}`);
-        if (result?.errorMessage) console.log(`    ${result.errorMessage.slice(0, 300)}`);
-      }
-      const pending = readiness.filter((tc) => !results.has(tc.test_case_uuid)).length;
-      if (!dryRun && pending > 0) {
+        const status = dryRun ? 'dry-run' : (result?.status ?? 'pending');
+        return { testCaseUuid: tc.test_case_uuid, path, status, errorMessage: result?.errorMessage };
+      });
+      const summary = { runId, scenarioId, dryRun, results: outcomes };
+      if (json) printJsonSummary(summary);
+      else printHumanSummary(summary);
+
+      const pending = outcomes.filter((o) => o.status === 'pending').length;
+      if (!dryRun && pending > 0 && !json) {
         console.error(`\n${pending} test case(s) hadn't settled by the poll timeout — check the run directly for the final state.`);
       }
+
+      process.exitCode = exitCodeFor(summary);
     },
   );
 

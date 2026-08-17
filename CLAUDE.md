@@ -24,17 +24,39 @@ called for local specs/stubs standing in for appq's tools; instead, the real
 were built directly on appq's `appq/autotest-mcp-tools` branch (isolated from the other
 feature in flight there), so there was never a stub to build or later swap out.
 
-**Current phase: Phase 5 code complete, nothing run live yet.** The appq side is done
-and verified: `appq:autotest-executor`/`-validator`/`autotest`, `get_automation_readiness`,
-`submit_execution_evidence`/`get_execution_evidence`, and the `blocked` status enum are
-all deployed to the real origin and confirmed working by direct MCP calls (PR #622,
-`appq/hotfix-autotest-mcp-tools`, merged to `appq/prod/iron`). `APPQ_ORIGIN` can point at
-the real origin now, not Lando. What's still unverified is this repo's own code: `judge`
-(Phase 2, one TC) and `run` (Phase 5, whole scenario + coverage policy + `--dry-run`) are
-built and typecheck clean, but neither has executed against a real LLM + real browser —
-confirming the appq tools work is not the same as confirming this client's engine,
-Playwright driving, or image-viewing wiring actually work end to end. `.env` now has real
-credentials (with Haiku set for both roles, to keep cost down for the first live runs).
+**Current phase: Phase 5 verified live, Phase 6 (CI polish) done.**
+The appq side is done and verified: `appq:autotest-executor`/`-validator`/`autotest`,
+`get_automation_readiness`, `submit_execution_evidence`/`get_execution_evidence`, and the
+`blocked` status enum are all deployed to the real origin and confirmed working by direct
+MCP calls (PR #622, `appq/hotfix-autotest-mcp-tools`, merged to `appq/prod/iron`).
+`APPQ_ORIGIN` can point at the real origin now, not Lando. `judge` (Phase 2, one TC) has
+run live against real DailyPulse/appq data (Haiku for both roles, `--dry-run`,
+`--environment Stage`): real Playwright browser, real executor→evidence→validator hand-off
+through appq, validator producing a grounded verdict citing actual accessibility-tree
+evidence. That first run surfaced and fixed two real bugs — `browser_take_screenshot`
+wasn't wired to `uploadScreenshot()` (the executor's prompt told it to POST screenshot
+bytes directly, which an LLM tool-calling loop can't do) and `uploadScreenshot()` sent
+the wrong Content-Type for appq's whitelist — see `src/tools/browserTools.ts` and
+`src/appq/mcpClient.ts`. `run` (Phase 5, whole scenario + coverage policy) has also now
+run live end to end against the same project (10 TCs, `on-script-absence` coverage):
+correctly caught a real regression (a field that should've been mandatory still showing
+as optional) and correctly marked a second TC `blocked` when the executor stumbled on a
+stale element ref after a page reload rather than fabricating a pass — the fail-closed
+design holding up under genuine model flakiness, not just the happy path. `.env` now has
+real credentials (with Haiku set for both roles, to keep cost down for the first live
+runs).
+
+**Phase 6 (CI polish) done:** `--json`/`--ci` on both `judge` and `run` (see
+`src/cli/output.ts`) print a single structured summary on stdout instead of the human
+table, and the process exits non-zero whenever a non-dry-run test case comes back
+failed/blocked/never-settled — `judge` now also polls `get_test_results` after
+`judgeTc()` (previously only `run` did) so its exit code reflects appq's own authoritative
+status rather than being parsed out of the validator's report prose. Example wiring at
+`.github/workflows/autotest.yml` (runs `--dry-run --ci`, uploads the JSON as an artifact —
+flip `--dry-run` off once trusted against a real project). Not done: an automated test
+suite for this client's own code (vitest/jest), and the dedicated CI service-account
+key the workflow example expects (`AUTOTEST_APPQ_API_KEY`) doesn't exist yet in appq —
+someone needs to actually create that account and scope its project membership.
 
 **Config philosophy:** avoid hardcoded values wherever a real choice exists — see
 `src/config/env.ts` and `.env.example` for the full surface (models per provider per
@@ -111,6 +133,12 @@ oversight to fix. Don't add a config knob for those.
   sending it. A dispatch-level intercept, not a prompt instruction, same reasoning as the
   destructive-action gate — the validator's own workflow prose is what decides to write,
   so "don't write" has to be enforced below that, not asked of it.
+- `src/cli/output.ts` — `--json`/`--ci`'s renderer: a single structured `RunSummary` (one
+  TC for `judge`, all of them for `run`) either printed as JSON or as the human table, plus
+  `exitCodeFor()` — non-zero whenever a non-dry-run result is `failed`/`blocked`/`pending`
+  (poll-timeout), so a CI job can gate on the process exit code without scraping prose.
+  Progress logs (`onEvent` → `console.error`) are untouched by this; it only changes the
+  final-outcome rendering on stdout.
 
 ## Commands
 
@@ -118,9 +146,12 @@ oversight to fix. Don't add a config knob for those.
 - `npm run build` / `npm run typecheck`
 - `npx tsx src/cli/index.ts runman --url <target> --project-id <id>` — Phase 1 proof run
 - `npx tsx src/cli/index.ts judge --test-case-uuid <uuid> --url <target> --scenario-id <id> --project-id <id>`
-  — one TC (add `--run-id` to reuse an existing run, `--dry-run` to suppress writeback)
-- `npx tsx src/cli/index.ts run --scenario-id <id> --project-id <id> --url <target> [--coverage <policy>] [--dry-run]`
+  — one TC (add `--run-id` to reuse an existing run, `--dry-run` to suppress writeback,
+  `--json`/`--ci` for a structured summary + CI-friendly exit code)
+- `npx tsx src/cli/index.ts run --scenario-id <id> --project-id <id> --url <target> [--coverage <policy>] [--dry-run] [--json|--ci]`
   — a whole scenario, consolidated report across every TC
+- `.github/workflows/autotest.yml` — example CI wiring for `run --dry-run --ci`; needs a
+  dedicated appq service-account key (see the workflow's comments) that doesn't exist yet
 
 ## Config
 
