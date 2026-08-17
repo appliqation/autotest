@@ -7,6 +7,7 @@ import type { Page } from 'playwright';
 import type { LlmToolDef, ToolResult } from '../types.js';
 import { EvidenceCapture } from '../evidence/capture.js';
 import { classifyClick } from './safety.js';
+import { uploadScreenshot } from '../appq/mcpClient.js';
 
 export const BROWSER_TOOL_DEFS: LlmToolDef[] = [
   {
@@ -63,7 +64,10 @@ export const BROWSER_TOOL_DEFS: LlmToolDef[] = [
   },
   {
     name: 'browser_take_screenshot',
-    description: 'Take a screenshot of the current viewport.',
+    description:
+      'Take a screenshot of the current viewport and stage it for attachment. Returns a screenshot_upload_id ' +
+      '— pass that straight through as submit_execution_evidence\'s screenshot_upload_id argument. You never ' +
+      'need to handle the image bytes yourself.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
@@ -148,7 +152,24 @@ export class PlaywrightBrowserTools {
       }
       case 'browser_take_screenshot': {
         const png = await this.page.screenshot({ type: 'png' });
-        return { ok: true, text: `Captured screenshot (${png.length} bytes)`, data: png };
+        try {
+          const uploadId = await uploadScreenshot(png, 'autotest-step');
+          return {
+            ok: true,
+            text: `Captured screenshot (${png.length} bytes). screenshot_upload_id: ${uploadId}`,
+            data: png,
+          };
+        } catch (err) {
+          // Non-fatal — the step's other evidence (accessibility snapshot,
+          // console/network deltas) still stands on its own; one failed
+          // upload shouldn't block the whole step.
+          return {
+            ok: true,
+            text: `Captured screenshot (${png.length} bytes), but staging it failed: ${(err as Error).message}. ` +
+              'No screenshot_upload_id available for this step — submit evidence without one.',
+            data: png,
+          };
+        }
       }
       case 'browser_console_messages': {
         const steps = this.evidence.getSteps();

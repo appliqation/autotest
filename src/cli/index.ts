@@ -57,7 +57,7 @@ function printResult(label: string, result: LoopResult): void {
   console.error(`\n(${result.turns} turns, budget exceeded: ${result.budgetExceeded})`);
 }
 
-async function resolveRun(opts: { runId?: string; scenarioId?: string; projectId?: string }): Promise<string> {
+async function resolveRun(opts: { runId?: string; scenarioId?: string; projectId?: string; environment?: string }): Promise<string> {
   if (opts.runId) return opts.runId;
   if (!opts.scenarioId || !opts.projectId) {
     throw new Error('--scenario-id and --project-id are required to create a run (or pass --run-id to reuse one).');
@@ -66,6 +66,7 @@ async function resolveRun(opts: { runId?: string; scenarioId?: string; projectId
     action: 'create_run',
     scenario_id: Number(opts.scenarioId),
     project_id: Number(opts.projectId),
+    ...(opts.environment ? { environment: opts.environment } : {}),
   });
   if (!created.ok) throw new Error(`Failed to create run: ${created.text}`);
   const parsed = JSON.parse(created.text) as { run_id: string };
@@ -147,6 +148,11 @@ program
   .option('--run-id <id>', 'reuse an existing run instead of creating one')
   .option('--scenario-id <id>', 'scenario ID (required to create a new run if --run-id is omitted)')
   .option('--project-id <id>', 'project ID (required to create a new run if --run-id is omitted)')
+  .option(
+    '--environment <name>',
+    'environment name to create the run against (required if --run-id is omitted and the project has no ' +
+      'auto-detectable "Local" environment — appq will list the available names in its error if you omit this)',
+  )
   .option(...MANDATORY_IMAGE_OPTION)
   .option(...DRY_RUN_OPTION)
   .action(
@@ -156,6 +162,7 @@ program
       runId?: string;
       scenarioId?: string;
       projectId?: string;
+      environment?: string;
       mandatoryImageCheck?: boolean;
       dryRun?: boolean;
     }) => {
@@ -200,6 +207,11 @@ program
   .requiredOption('--url <url>', 'starting URL, used for every TC that gets agentic coverage')
   .option('--run-id <id>', 'reuse an existing run instead of creating one')
   .option(
+    '--environment <name>',
+    'environment name to create the run against (required if --run-id is omitted and the project has no ' +
+      'auto-detectable "Local" environment)',
+  )
+  .option(
     '--coverage <policy>',
     'always | on-script-absence | sampled:N | external — see the plan doc\'s "coverage decision" for why this ' +
       'is never hardcoded. Defaults to on-script-absence: a conservative bootstrap choice, not a product stance.',
@@ -217,6 +229,7 @@ program
       projectId: string;
       url: string;
       runId?: string;
+      environment?: string;
       coverage: string;
       pollTimeoutMs?: string;
       mandatoryImageCheck?: boolean;
@@ -231,7 +244,12 @@ program
       const dryRun = opts.dryRun ?? false;
       const pollTimeoutMs = opts.pollTimeoutMs ? Number(opts.pollTimeoutMs) : config.pollTimeoutMs;
 
-      const runId = await resolveRun({ runId: opts.runId, scenarioId: opts.scenarioId, projectId: opts.projectId });
+      const runId = await resolveRun({
+        runId: opts.runId,
+        scenarioId: opts.scenarioId,
+        projectId: opts.projectId,
+        environment: opts.environment,
+      });
       console.error(
         `[setup] coverage: ${opts.coverage}, image check: ${mandatoryImageCheck ? 'mandatory' : 'on-demand'}, dry-run: ${dryRun}`,
       );

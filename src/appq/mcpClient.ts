@@ -102,16 +102,21 @@ export async function listTools(): Promise<Array<{ name: string; description: st
 }
 
 /**
- * Claims a locally-captured screenshot for attachment to create_defect, via
- * appq's two-step upload flow: POST the blob, get an upload_id back, pass
- * that id as create_defect's screenshot_upload_id.
+ * Claims a locally-captured screenshot for attachment (create_defect's
+ * screenshot_upload_id, or submit_execution_evidence's), via appq's
+ * two-step upload flow: POST the blob, get an upload_id back.
+ *
+ * Content-Type MUST be one appq's endpoint whitelists (image/png, jpeg,
+ * gif, webp) — it validates both the header and the actual magic bytes
+ * against it and rejects anything else with 415. application/octet-stream
+ * (a very natural first guess for "raw binary") fails this every time.
  */
 export async function uploadScreenshot(pngBuffer: Buffer, label: string): Promise<string> {
   const res = await fetch(`${config.appqOrigin}/api/appq/mcp/upload-screenshot`, {
     method: 'POST',
     headers: {
       'X-API-Key': config.appqApiKey(),
-      'Content-Type': 'application/octet-stream',
+      'Content-Type': 'image/png',
       'X-Screenshot-Label': label,
     },
     body: new Uint8Array(pngBuffer),
