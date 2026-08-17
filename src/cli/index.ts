@@ -12,6 +12,7 @@ import { createOpenAiAdapter } from '../providers/openai.js';
 import { PlaywrightBrowserTools, BROWSER_TOOL_DEFS } from '../tools/browserTools.js';
 import { READONLY_APPQ_TOOLS, executorAllowedAppqTools, validatorAllowedAppqTools } from '../tools/safety.js';
 import { fetchAppqToolDefs, createGatedAppqDispatcher } from '../tools/appqTools.js';
+import { ScreenshotViewer } from '../tools/screenshotViewer.js';
 import { callTool } from '../appq/mcpClient.js';
 import { runWorkflow } from '../engine/workflowRunner.js';
 import type { LoopResult } from '../engine/loop.js';
@@ -106,7 +107,13 @@ program
   .option('--run-id <id>', 'reuse an existing run instead of creating one')
   .option('--scenario-id <id>', 'scenario ID (required to create a new run if --run-id is omitted)')
   .option('--project-id <id>', 'project ID (required to create a new run if --run-id is omitted)')
-  .action(async (opts: { testCaseUuid: string; url: string; runId?: string; scenarioId?: string; projectId?: string }) => {
+  .option(
+    '--mandatory-image-check',
+    'Fetch and attach every step\'s screenshot to the validator unconditionally, instead of leaving it to the ' +
+      'model to request one via view_screenshot when text evidence isn\'t enough. More tokens, stronger ' +
+      'guarantee — a deployment/customer choice, not a testing-methodology one. Defaults to MANDATORY_IMAGE_CHECK.',
+  )
+  .action(async (opts: { testCaseUuid: string; url: string; runId?: string; scenarioId?: string; projectId?: string; mandatoryImageCheck?: boolean }) => {
     const adapter = buildAdapter();
 
     // Resolving the run is deterministic orchestration, not an LLM decision
@@ -157,14 +164,17 @@ program
     // tools, no messages carried over from stage 1, nothing but run_id and
     // test_case_uuid in common. It pulls evidence and writes the verdict
     // itself, as its own last phase.
+    const mandatoryImageCheck = opts.mandatoryImageCheck ?? config.mandatoryImageCheck;
+    console.error(`[setup] image check mode: ${mandatoryImageCheck ? 'mandatory (every step)' : 'on-demand'}`);
+    const screenshotViewer = new ScreenshotViewer(mandatoryImageCheck);
     const validatorToolDefs = await fetchAppqToolDefs(validatorAllowedAppqTools());
     const gatedValidatorAppq = createGatedAppqDispatcher(validatorAllowedAppqTools());
 
     const validatorResult = await runWorkflow({
       source: { kind: 'appq', name: 'appq:autotest-validator', args: { run_id: runId, test_case_uuid: opts.testCaseUuid } },
       seedMessage: `Run: ${runId}\nTest case: ${opts.testCaseUuid}\nBegin now — start with get_scenario.`,
-      tools: validatorToolDefs,
-      dispatch: gatedValidatorAppq,
+      tools: [...validatorToolDefs, ...screenshotViewer.toolDefs()],
+      dispatch: screenshotViewer.wrapDispatch(gatedValidatorAppq),
       adapter,
       budget: config.budget,
       onEvent: logEvent('[validator] '),

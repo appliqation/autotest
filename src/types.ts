@@ -12,11 +12,21 @@ export interface LlmToolCall {
   arguments: Record<string, unknown>;
 }
 
+export interface LlmImage {
+  /** Base64-encoded image bytes (no data: URI prefix). */
+  data: string;
+  mimeType: string;
+  /** Optional caption, e.g. "step 3 screenshot" — helps the model refer back to it. */
+  label?: string;
+}
+
 export interface LlmMessage {
   role: 'user' | 'assistant' | 'tool';
   content: string;
   toolCalls?: LlmToolCall[];
   toolCallId?: string;
+  /** Images attached to a tool result — see ToolResult.images. */
+  images?: LlmImage[];
 }
 
 export interface LlmCompleteResult {
@@ -45,6 +55,12 @@ export interface ToolResult {
   ok: boolean;
   text: string;
   data?: unknown;
+  /**
+   * Real image content to attach as vision input on the next turn — not just
+   * a URL in text. Populated when a tool result should actually be *seen* by
+   * the model, not merely referenced. See tools/screenshotViewer.ts.
+   */
+  images?: LlmImage[];
 }
 
 export interface RunBudget {

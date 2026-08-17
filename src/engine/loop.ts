@@ -63,8 +63,16 @@ export async function runLoop(args: {
       } catch (err) {
         result = { ok: false, text: `Tool error: ${(err as Error).message}` };
       }
-      onEvent?.({ type: 'tool', detail: { name: call.name, args: call.arguments, result: result.text } });
-      messages.push({ role: 'tool', toolCallId: call.id, content: result.text });
+      onEvent?.({
+        type: 'tool',
+        detail: {
+          name: call.name,
+          args: call.arguments,
+          result: result.text,
+          images: result.images?.length ? result.images.length : undefined,
+        },
+      });
+      messages.push({ role: 'tool', toolCallId: call.id, content: result.text, images: result.images });
     }
   }
 

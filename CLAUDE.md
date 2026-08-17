@@ -61,11 +61,22 @@ instance running that branch (see `.env.example`), not `https://appq.appliqation
   `uploadScreenshot()`.
 - `src/evidence/capture.ts` — screenshot/console/network/accessibility-snapshot capture
   via native Playwright/CDP APIs.
+- `src/tools/screenshotViewer.ts` — turns `get_execution_evidence`'s `screenshot_url` (a
+  string in text, never actually seen by the model on its own) into a real vision input.
+  Two modes, chosen by `--mandatory-image-check`/`MANDATORY_IMAGE_CHECK`, deliberately an
+  orchestration/deployment setting and not something the workflow prompt controls: on-
+  demand (model gets a `view_screenshot(step_index)` tool, decides for itself when text
+  evidence isn't enough — most steps don't need it) or mandatory (every step's screenshot
+  fetched and attached unconditionally, enforced in code before the model ever gets a
+  turn — same reasoning as the destructive-action gate: don't rely on the model asking).
 - `src/providers/` — official `@anthropic-ai/sdk`/`openai` adapters. The Anthropic one
   sets `cache_control` breakpoints (system prompt, tool defs, growing message history) —
   see the plan/session notes on why: the workflow prompt and tool list are static and
   reused across every turn and every TC, and the full history gets resent every turn
-  regardless, so caching is high-leverage here, not optional polish.
+  regardless, so caching is high-leverage here, not optional polish. Both adapters also
+  handle `LlmMessage.images` on tool results — Anthropic inline in the `tool_result`
+  block, OpenAI as a synthetic follow-up `input_image` message (the Responses API has no
+  way to attach an image to a function output directly).
 
 ## Commands
 

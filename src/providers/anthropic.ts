@@ -12,6 +12,21 @@ const MODEL = 'claude-sonnet-5';
 // charged at full price; everything before it is a cache read.
 const CACHE_CONTROL: Anthropic.CacheControlEphemeral = { type: 'ephemeral' };
 
+function toAnthropicMediaType(mimeType: string): Anthropic.Base64ImageSource['media_type'] {
+  switch (mimeType) {
+    case 'image/jpeg':
+    case 'image/png':
+    case 'image/gif':
+    case 'image/webp':
+      return mimeType;
+    default:
+      // Screenshots are always PNG in practice (Playwright's default and
+      // what appq's screenshot pipeline stores) — fall back rather than
+      // throw on an unexpected content-type from a presigned URL fetch.
+      return 'image/png';
+  }
+}
+
 function toAnthropicMessages(messages: LlmMessage[]): Anthropic.MessageParam[] {
   const out: Anthropic.MessageParam[] = [];
   for (const m of messages) {
@@ -25,9 +40,25 @@ function toAnthropicMessages(messages: LlmMessage[]): Anthropic.MessageParam[] {
       }
       out.push({ role: 'assistant', content: blocks });
     } else if (m.role === 'tool') {
+      // Images attached to a tool result (see tools/screenshotViewer.ts) go
+      // inside the SAME tool_result block, alongside the text — that's the
+      // only way Anthropic's API accepts them; a bare image content block
+      // outside a tool_result is not valid here. Without this, an "image"
+      // is just a URL string in text the model never actually sees.
+      const content: Anthropic.ToolResultBlockParam['content'] = m.images?.length
+        ? [
+            { type: 'text', text: m.content },
+            ...m.images.map(
+              (img): Anthropic.ImageBlockParam => ({
+                type: 'image',
+                source: { type: 'base64', media_type: toAnthropicMediaType(img.mimeType), data: img.data },
+              }),
+            ),
+          ]
+        : m.content;
       out.push({
         role: 'user',
-        content: [{ type: 'tool_result', tool_use_id: m.toolCallId ?? '', content: m.content }],
+        content: [{ type: 'tool_result', tool_use_id: m.toolCallId ?? '', content }],
       });
     }
   }
