@@ -69,9 +69,21 @@ timers, not real sleeps), `engine/budget.ts`, `cli/resolvers.ts`. `cli/resolvers
 new file — `resolveRun`/`scenarioIdFromTcUuid`/`resolveScenarioId`/`fetchScenarioInfo`/
 `resolveUrl` were extracted out of `cli/index.ts` specifically to make them importable in
 isolation without triggering that file's top-level `program.parseAsync(process.argv)` side
-effect. Not yet covered: `engine/loop.ts`, `orchestrator/judgeTc.ts`, `tools/browserTools.ts`,
-`providers/*.ts` — all real integration-test territory (live Playwright pages, live
-provider SDKs), a reasonable next slice but a different kind of test than what's here.
+effect. Second slice added `engine/loop.ts` (the think→act→observe loop itself — turned out
+fully unit-testable with a mocked `ProviderAdapter`/`ToolDispatcher`, not integration-test
+territory as first assumed: budget-cap messaging, the max-turns hard stop with its final
+tools-withheld completion call, abort-signal handling mid-tool-loop, dispatch-error
+recovery), `engine/workflowRunner.ts` (appq vs local workflow source resolution),
+`appq/mcpClient.ts` (the JSON-RPC client itself, mocked `fetch` — request/response
+shape, error mapping, the `image/png` vs `application/octet-stream` upload content-type
+that broke a real live run earlier this session), and `config/env.ts` (`resolveModel`'s
+full role-override > blanket-override > provider-default precedence, using
+`vi.resetModules()` since `config` is frozen at import time from `process.env` — `dotenv/config`
+mocked to a no-op so this repo's real `.env` credentials never leak into a test run). 208
+tests total. Not yet covered: `orchestrator/judgeTc.ts`, `tools/browserTools.ts`,
+`providers/anthropic.ts`/`openai.ts` — these still need a real Playwright `Page`/browser or a
+live provider SDK client, genuine integration-test territory rather than pure logic with a
+mockable seam.
 
 **`run` merged into `judge`:** originally two separate commands (`judge` for one TC,
 `run` for a whole scenario) — merged into one, since `run` was always just `judge`'s exact
