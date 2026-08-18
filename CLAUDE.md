@@ -79,11 +79,43 @@ shape, error mapping, the `image/png` vs `application/octet-stream` upload conte
 that broke a real live run earlier this session), and `config/env.ts` (`resolveModel`'s
 full role-override > blanket-override > provider-default precedence, using
 `vi.resetModules()` since `config` is frozen at import time from `process.env` — `dotenv/config`
-mocked to a no-op so this repo's real `.env` credentials never leak into a test run). 208
-tests total. Not yet covered: `orchestrator/judgeTc.ts`, `tools/browserTools.ts`,
-`providers/anthropic.ts`/`openai.ts` — these still need a real Playwright `Page`/browser or a
-live provider SDK client, genuine integration-test territory rather than pure logic with a
-mockable seam.
+mocked to a no-op so this repo's real `.env` credentials never leak into a test run).
+
+Third slice covered what was left — real Playwright/SDK integration points, using a fake
+`Page`/browser chain and mocked SDK client constructors rather than the real thing:
+`tools/browserTools.ts`, `evidence/capture.ts`, `orchestrator/judgeTc.ts` (mocked
+`chromium.launch()` — browser-lifecycle guarantees: closes even when the executor stage
+throws, and the validator stage never runs in that case; `browser.version()`'s label
+correctly threading into the validator's `create_defect` calls), `providers/anthropic.ts`/
+`openai.ts` (mocked `@anthropic-ai/sdk`/`openai` client constructors as classes, not
+`vi.fn().mockImplementation()` — the latter doesn't honor a returned object under `new` in
+this vitest version, cost an hour of debugging before switching; message/image conversion
+for both wire formats, Anthropic's cache-control breakpoints, the real `?? undefined` vs `0`
+distinction on `cache_read_input_tokens`). 277 tests total — every source file with real
+logic now has one, except `cli/index.ts` itself (Commander wiring calling already-tested
+pieces; testing it meaningfully would mean invoking `.parseAsync()` with fake argv, more
+E2E than unit) and the `.d.ts` type shim (no runtime code).
+
+**Two real bugs surfaced by writing this last slice, not yet fixed — flagging rather than
+silently patching, since both are behavior changes:**
+1. `EvidenceCapture.captureStep()` is defined but never called anywhere in this codebase
+   (grepped: zero call sites outside its own file and the new test). `getSteps()` is
+   therefore always empty, so `browser_console_messages`/`browser_network_requests`
+   unconditionally return `"[]"` regardless of what actually happened on the page. Since
+   the executor is instructed to call these before `submit_execution_evidence`, this may
+   mean console/network deltas have been submitted empty to appq this whole time —
+   independent of the model-compliance explanation floated earlier this session for a
+   similar-looking gap. `EvidenceCapture` itself works correctly once `captureStep()` is
+   actually called (covered by `evidence/capture.test.ts`) — this is a wiring gap, not a
+   bug in the capture logic.
+2. In `judgeTc.ts`, `createDryRunDispatcher` wraps `createBrowserLabelDispatcher` from the
+   outside (`createDryRunDispatcher(createBrowserLabelDispatcher(...), dryRun)`). Since
+   `createDryRunDispatcher` intercepts `create_defect`/`update_run_results` before ever
+   calling `inner`, the browser-label correction never runs for a dry-run verdict-write —
+   the logged "would call create_defect with..." preview shows the model's own raw
+   (possibly bare/wrong) `browser` value, not what a real, non-dry-run call would actually
+   send. Confirmed empirically in `judgeTc.test.ts`. Fix would be reordering the wrap so
+   `createBrowserLabelDispatcher` is outermost.
 
 **`run` merged into `judge`:** originally two separate commands (`judge` for one TC,
 `run` for a whole scenario) — merged into one, since `run` was always just `judge`'s exact
