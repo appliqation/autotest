@@ -86,38 +86,54 @@ function scenarioIdFromTcUuid(tcUuid: string): number {
   return id;
 }
 
+/**
+ * scenario_id is never accepted as a separate input alongside a TC UUID —
+ * it's mathematically embedded in the UUID, so a caller-supplied value
+ * could only ever be a stale/typo'd duplicate, never a legitimate
+ * override. In whole-scenario mode there's nothing to derive it from, so
+ * --scenario-id is the one genuinely required primary input there.
+ */
 function resolveScenarioId(opts: { scenarioId?: string; testCaseUuid?: string }): number {
-  if (opts.scenarioId) return Number(opts.scenarioId);
   if (opts.testCaseUuid) return scenarioIdFromTcUuid(opts.testCaseUuid);
-  throw new Error('--scenario-id is required (or pass --test-case-uuid, which encodes it).');
+  if (opts.scenarioId) return Number(opts.scenarioId);
+  throw new Error('--scenario-id is required in whole-scenario mode (no --test-case-uuid given).');
 }
 
-/** get_scenario needs only scenario_id — its response always includes "Project ID: N", parsed out here. */
-async function resolveProjectId(opts: { projectId?: string }, scenarioId: number): Promise<number> {
-  if (opts.projectId) return Number(opts.projectId);
+/**
+ * project_id is always derived, never accepted as a separate input — a
+ * scenario belongs to exactly one project, so a caller-supplied value that
+ * diverges from the real one can only be wrong. get_scenario needs only
+ * scenario_id; its response always includes "Project ID: N".
+ */
+async function resolveProjectId(scenarioId: number): Promise<number> {
   const result = await callTool('get_scenario', { scenario_id: scenarioId });
-  if (!result.ok) throw new Error(`get_scenario failed while deriving --project-id: ${result.text}`);
+  if (!result.ok) throw new Error(`get_scenario failed while resolving the project for scenario ${scenarioId}: ${result.text}`);
   const match = result.text.match(/Project ID:\s*(\d+)/);
   if (!match) throw new Error(`Could not find a project ID in get_scenario's response for scenario ${scenarioId}.`);
-  console.error(`[setup] derived project ${match[1]} from scenario ${scenarioId}`);
+  console.error(`[setup] project ${match[1]} (scenario ${scenarioId})`);
   return Number(match[1]);
 }
 
-/** get_project_settings already stores a URL per named environment — no need to ask for both. */
-async function resolveUrl(opts: { url?: string; environment?: string }, projectId: number): Promise<string> {
-  if (opts.url) return opts.url;
-  if (!opts.environment) {
-    throw new Error('--url or --environment is required (the URL is looked up from the environment when --url is omitted).');
-  }
+/**
+ * url is always derived from --environment, never accepted as a separate
+ * input. Unlike project_id (which create_run itself validates against the
+ * scenario and rejects on mismatch), there's no server-side check that a
+ * caller-supplied URL actually matches the named environment — a diverging
+ * value would silently test the wrong target while the run gets recorded
+ * against a different environment, with nothing to catch it. Removing the
+ * override closes that gap rather than trusting the caller to keep the two
+ * in sync. get_project_settings already stores a URL per named environment.
+ */
+async function resolveUrl(environment: string, projectId: number): Promise<string> {
   const result = await callTool('get_project_settings', { project_id: projectId });
-  if (!result.ok) throw new Error(`get_project_settings failed while deriving --url: ${result.text}`);
+  if (!result.ok) throw new Error(`get_project_settings failed while resolving the URL for environment "${environment}": ${result.text}`);
   const settings = JSON.parse(result.text) as { environments?: Array<{ name: string; url: string }> };
-  const env = (settings.environments ?? []).find((e) => e.name === opts.environment);
+  const env = (settings.environments ?? []).find((e) => e.name === environment);
   if (!env) {
     const available = (settings.environments ?? []).map((e) => e.name).join(', ') || '(none configured)';
-    throw new Error(`No environment named "${opts.environment}" on project ${projectId}. Available: ${available}`);
+    throw new Error(`No environment named "${environment}" on project ${projectId}. Available: ${available}`);
   }
-  console.error(`[setup] derived url ${env.url} from environment "${opts.environment}"`);
+  console.error(`[setup] url ${env.url} (environment "${environment}")`);
   return env.url;
 }
 
@@ -204,32 +220,23 @@ program
       "shared context between them, the validator never sees the executor's own conversation, only what it " +
       'explicitly submitted as evidence. In whole-scenario mode, a coverage policy decides per TC whether the ' +
       'agentic pair runs at all, alongside whatever the deterministic canonical-script pipeline already does ' +
-      'automatically; the report then covers every TC either way. scenario_id/project_id/url are all optional ' +
-      '— derived automatically wherever appq already knows the answer (see each option below).',
+      'automatically; the report then covers every TC either way. project_id and url are always derived, never ' +
+      'accepted as separate inputs — a caller-supplied value diverging from the real one would either be ' +
+      'silently wrong (url, no server-side check) or rejected late (project_id, appq validates it against the ' +
+      "scenario) — deriving instead of asking avoids both failure modes, the same reason MCP tools themselves " +
+      'prefer deducing over trusting a second, possibly-inconsistent input.',
   )
   .option(
     '--test-case-uuid <uuid>',
-    'test case UUID to judge. Omit to judge a whole scenario instead (then --scenario-id is required).',
+    'test case UUID to judge. Omit to judge a whole scenario instead (then --scenario-id is required). When ' +
+      'given, scenario_id is always derived from it (the UUID is "{scenario_id}-{uuid4}") — --scenario-id is ' +
+      'not accepted alongside it.',
   )
-  .option(
-    '--scenario-id <id>',
-    'scenario ID. Required in whole-scenario mode; auto-derived from --test-case-uuid otherwise (the UUID is ' +
-      'always "{scenario_id}-{uuid4}").',
-  )
-  .option(
-    '--project-id <id>',
-    'project ID. Auto-derived via get_scenario if omitted — appq already knows which project a scenario ' +
-      'belongs to.',
-  )
-  .option(
-    '--url <url>',
-    'starting URL. Auto-derived from --environment via get_project_settings if omitted — every configured ' +
-      'environment already has a URL, no need to state both.',
-  )
-  .option(
+  .option('--scenario-id <id>', 'scenario ID — required in whole-scenario mode (no --test-case-uuid given)')
+  .requiredOption(
     '--environment <name>',
-    'environment name. Required if --url is omitted (used both to create the run and to look up its URL) — ' +
-      'appq will list the available names in its error if the one given doesn\'t match.',
+    'environment name — its URL (from get_project_settings) is what the browser navigates to; appq will list ' +
+      "the available names in its error if the one given doesn't match.",
   )
   .option('--run-id <id>', 'reuse an existing run instead of creating one')
   .option(
@@ -250,9 +257,7 @@ program
     async (opts: {
       testCaseUuid?: string;
       scenarioId?: string;
-      projectId?: string;
-      url?: string;
-      environment?: string;
+      environment: string;
       runId?: string;
       coverage: string;
       pollTimeoutMs?: string;
@@ -268,8 +273,8 @@ program
       const dryRun = opts.dryRun ?? false;
 
       const scenarioId = resolveScenarioId(opts);
-      const projectId = await resolveProjectId(opts, scenarioId);
-      const url = await resolveUrl(opts, projectId);
+      const projectId = await resolveProjectId(scenarioId);
+      const url = await resolveUrl(opts.environment, projectId);
       const runId = await resolveRun({
         runId: opts.runId,
         scenarioId: String(scenarioId),

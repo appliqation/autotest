@@ -62,13 +62,26 @@ someone needs to actually create that account and scope its project membership.
 same `judgeTc()` call looped with a coverage-policy decision layered on top, not a
 genuinely different mechanism. `judge --test-case-uuid <uuid>` is single-TC mode
 (unconditional executor/validator pair); `judge --scenario-id <id>` with no
-`--test-case-uuid` is whole-scenario mode (coverage policy decides per TC). Also:
-`--scenario-id`/`--project-id`/`--url` are now all optional, auto-derived wherever appq
-already has the answer — scenario_id from the TC UUID's own `{scenario_id}-{uuid4}`
-format, project_id via `get_scenario`, url via `get_project_settings`'s per-environment
-URL given `--environment`. Verified live against real DailyPulse data (project/url
-correctly derived, full executor loop ran normally on the derived values) — see
-`resolveScenarioId`/`resolveProjectId`/`resolveUrl` in `src/cli/index.ts`.
+`--test-case-uuid` is whole-scenario mode (coverage policy decides per TC).
+
+`--project-id` and `--url` are **not CLI options at all** — always derived, never
+accepted as separate caller-supplied inputs (`resolveProjectId`/`resolveUrl` in
+`src/cli/index.ts`): project_id via `get_scenario` (a scenario belongs to exactly one
+project, so there's no legitimate override case), url via `get_project_settings`'s
+per-environment URL given `--environment` (now a `requiredOption`). Deliberate, not an
+oversight: a caller-supplied `--project-id` that diverged from the real one would at
+least get rejected late by appq's own `create_run` validation, but a caller-supplied
+`--url` that diverged from the named `--environment`'s real URL had **no check
+anywhere** — the browser would silently test the wrong target while the run got recorded
+against a different environment. Removing the override closes that gap rather than
+trusting the caller to keep two representations of the same thing in sync — the same
+reasoning MCP tools themselves already follow (deduce from one source of truth, don't
+accept a second value that could quietly disagree with it). `--scenario-id` stays a real
+option, but only matters/is read in whole-scenario mode — in single-TC mode it's always
+derived from the TC UUID's own `{scenario_id}-{uuid4}` format, silently ignored if passed
+alongside `--test-case-uuid`. Verified live against real DailyPulse data after removing
+the override paths — project/url still resolve correctly, missing `--environment` fails
+immediately via commander before any API call.
 
 **Config philosophy:** avoid hardcoded values wherever a real choice exists — see
 `src/config/env.ts` and `.env.example` for the full surface (models per provider per
@@ -91,8 +104,9 @@ oversight to fix. Don't add a config knob for those.
   `get_test_results` once for the full TC list — that single poll picks up both the
   deterministic pipeline's own results and whatever the validator already wrote itself, so
   no special-casing is needed between the two paths. `resolveScenarioId`/`resolveProjectId`/
-  `resolveUrl` (top of `index.ts`) derive scenario_id/project_id/url wherever appq already
-  knows the answer, so only what's genuinely required needs to be typed.
+  `resolveUrl` (top of `index.ts`) always derive project_id/url (never accepted as CLI
+  options — see "Current phase" above for why) and scenario_id from the TC UUID in
+  single-TC mode.
 - `src/orchestrator/` — `judgeTc.ts` (the executor→validator pair for one TC, factored out
   so `judge`'s two modes share exactly one implementation), `coveragePolicy.ts` (`always` /
   `on-script-absence` / `sampled:N` / `external` — never hardcoded, see the plan's
@@ -160,14 +174,14 @@ oversight to fix. Don't add a config knob for those.
 - `npm run dev -- <command>` — run the CLI via `tsx` without building
 - `npm run build` / `npm run typecheck`
 - `npx tsx src/cli/index.ts runman --url <target> --project-id <id>` — Phase 1 proof run
-- `npx tsx src/cli/index.ts judge --test-case-uuid <uuid> [--environment <name>]`
-  — one TC. `--scenario-id`/`--project-id`/`--url` are optional (auto-derived from the
-  UUID/`get_scenario`/`get_project_settings`); pass `--run-id` to reuse an existing run,
-  `--dry-run` to suppress writeback, `--json`/`--ci` for a structured summary + CI-friendly
-  exit code.
-- `npx tsx src/cli/index.ts judge --scenario-id <id> [--environment <name>] [--coverage <policy>] [--dry-run] [--json|--ci]`
+- `npx tsx src/cli/index.ts judge --test-case-uuid <uuid> --environment <name>`
+  — one TC. `--environment` is required (its URL is looked up, never taken directly);
+  project_id/scenario_id are always derived, not accepted as options. Pass `--run-id` to
+  reuse an existing run, `--dry-run` to suppress writeback, `--json`/`--ci` for a
+  structured summary + CI-friendly exit code.
+- `npx tsx src/cli/index.ts judge --scenario-id <id> --environment <name> [--coverage <policy>] [--dry-run] [--json|--ci]`
   — a whole scenario (no `--test-case-uuid`), consolidated report across every TC.
-  `--project-id`/`--url` are still optional/auto-derived the same way.
+  `--project-id`/`--url` are still not options — always derived from `--scenario-id`.
 - `.github/workflows/autotest.yml` — example CI wiring for `judge --dry-run --ci`; needs a
   dedicated appq service-account key (see the workflow's comments) that doesn't exist yet
 
