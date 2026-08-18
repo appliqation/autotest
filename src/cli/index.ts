@@ -21,6 +21,7 @@ import { judgeTc } from '../orchestrator/judgeTc.js';
 import { parseCoveragePolicy, shouldRunAgenticCoverage } from '../orchestrator/coveragePolicy.js';
 import { pollTestResults } from '../orchestrator/pollResults.js';
 import { printJsonSummary, printHumanSummary, exitCodeFor } from './output.js';
+import { resolveStorageState } from '../tools/authState.js';
 import type { TcOutcome } from './output.js';
 import type { LoopResult } from '../engine/loop.js';
 import type { ProviderAdapter, ToolDispatcher } from '../types.js';
@@ -240,6 +241,14 @@ program
   )
   .option('--run-id <id>', 'reuse an existing run instead of creating one')
   .option(
+    '--role <name>',
+    'authenticate the executor as this role before navigating, using the Playwright storageState at the path ' +
+      '@appliqation/automation-sdk\'s setupAuth({project_id, role}) resolves (~/.appq-auth/ by default). Omit for ' +
+      'ungated projects — no auth handling happens at all in that case, same as before this option existed. If ' +
+      'given and no session exists yet, run `npx appq-auth-setup --project-id <id> --role <name>` first — this ' +
+      'client only ever reads that file, it never performs login or handles credentials itself.',
+  )
+  .option(
     '--coverage <policy>',
     'always | on-script-absence | sampled:N | external — only meaningful in whole-scenario mode; see the plan ' +
       'doc\'s "coverage decision" for why this is never hardcoded. Defaults to on-script-absence.',
@@ -259,6 +268,7 @@ program
       scenarioId?: string;
       environment: string;
       runId?: string;
+      role?: string;
       coverage: string;
       pollTimeoutMs?: string;
       mandatoryImageCheck?: boolean;
@@ -275,6 +285,11 @@ program
       const scenarioId = resolveScenarioId(opts);
       const projectId = await resolveProjectId(scenarioId);
       const url = await resolveUrl(opts.environment, projectId);
+      // Resolved once, reused for every TC in this invocation — this client
+      // never performs login itself, only reads the session file
+      // appq-auth-setup (or the customer's own CI) already produced.
+      const storageState = opts.role ? resolveStorageState(projectId, opts.role) : undefined;
+      if (opts.role) console.error(`[setup] authenticated as role "${opts.role}"`);
       const runId = await resolveRun({
         runId: opts.runId,
         scenarioId: String(scenarioId),
@@ -290,6 +305,7 @@ program
           runId,
           testCaseUuid,
           url,
+          storageState,
           executorAdapter,
           validatorAdapter,
           budget: config.budget,
@@ -369,6 +385,7 @@ program
             runId,
             testCaseUuid: tcUuid,
             url,
+            storageState,
             executorAdapter,
             validatorAdapter,
             budget: config.budget,

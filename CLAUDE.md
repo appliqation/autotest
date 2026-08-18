@@ -83,6 +83,24 @@ alongside `--test-case-uuid`. Verified live against real DailyPulse data after r
 the override paths — project/url still resolve correctly, missing `--environment` fails
 immediately via commander before any API call.
 
+**Authenticated sessions (`judge --role`):** the executor previously had no login handling
+at all — never surfaced because every live test targeted DailyPulse, an ungated demo site.
+No appq-side change was needed to fix this: Appliqation already has a complete mechanism
+(`appq:setup-auth` for a human-reviewed, customer-committed `login.ts`; `@appliqation/automation-sdk`'s
+`setupAuth({project_id, role})` for the canonical session-file path every runtime agrees
+on; `npx appq-auth-setup` to actually perform the login and write that file). This client
+just became one more reader of that file — see `src/tools/authState.ts` above. Verified
+directly: `resolveStorageState()` against the real SDK path function (both the fail-closed
+missing-file error and the happy-path read), the CLI failing immediately before any run
+creation when `--role` names a session that doesn't exist, and a full regression check
+confirming the unauthenticated path (no `--role`) still works after switching
+`judgeTc.ts`'s browser launch from `browser.newPage()` to an explicit
+`browser.newContext()` (needed so `storageState` has something to attach to). **Not**
+verified in this environment: the actual authenticated-navigation happy path — there's no
+real gated project among what this session has touched, so a real `storageState` actually
+getting an executor past a login wall is unconfirmed and should be checked against a real
+gated project before trusting it.
+
 **Config philosophy:** avoid hardcoded values wherever a real choice exists — see
 `src/config/env.ts` and `.env.example` for the full surface (models per provider per
 role, max tokens, all budget caps, ring buffer size, poll interval/timeout). The one
@@ -168,6 +186,22 @@ oversight to fix. Don't add a config knob for those.
   `failed`/`blocked`/`pending` (poll-timeout), so a CI job can gate on the process exit
   code without scraping prose. Progress logs (`onEvent` → `console.error`) are untouched
   by this; it only changes the final-outcome rendering on stdout.
+- `src/tools/authState.ts` — `judge --role <name>`'s implementation: reads the Playwright
+  storageState `@appliqation/automation-sdk`'s `setupAuth({project_id, role})` resolves
+  (`~/.appq-auth/` by default), fail-closed with an actionable error (pointing at
+  `npx appq-auth-setup`) if it doesn't exist yet. Deliberately does not perform login or
+  handle credentials itself — Appliqation already has a complete, human-reviewed mechanism
+  for that (`appq:setup-auth` produces a customer-committed `login.ts`; `appq-auth-setup`,
+  also shipped by the SDK, runs it and writes the session file) and this client is just one
+  more reader of the same file every other runtime already agrees on. Resolved once per
+  CLI invocation (`cli/index.ts`) and threaded into `judgeTc.ts`'s executor browser context
+  only (`browser.newContext({storageState})`) — the validator never launches a browser, so
+  it's not relevant there. Credentials never reach this client or the LLM's own context;
+  only the resulting session (cookies/localStorage) does, read directly from disk in code.
+  `@appliqation/automation-sdk/utils` ships with no TypeScript declarations (confirmed by
+  reading the installed package — only `./login` has a `.d.ts`) — `src/types/automation-sdk.d.ts`
+  is a minimal ambient shim for just the functions actually used here, kept in sync with
+  the real source rather than guessed.
 
 ## Commands
 
@@ -182,6 +216,8 @@ oversight to fix. Don't add a config knob for those.
 - `npx tsx src/cli/index.ts judge --scenario-id <id> --environment <name> [--coverage <policy>] [--dry-run] [--json|--ci]`
   — a whole scenario (no `--test-case-uuid`), consolidated report across every TC.
   `--project-id`/`--url` are still not options — always derived from `--scenario-id`.
+- Add `--role <name>` to either form for a gated project — see `src/tools/authState.ts`
+  above. Omit entirely for ungated projects; nothing changes for them.
 - `.github/workflows/autotest.yml` — example CI wiring for `judge --dry-run --ci`; needs a
   dedicated appq service-account key (see the workflow's comments) that doesn't exist yet
 

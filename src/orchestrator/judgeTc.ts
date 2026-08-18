@@ -4,6 +4,7 @@
 // can drift.
 
 import { chromium } from 'playwright';
+import type { BrowserContextOptions } from 'playwright';
 import { PlaywrightBrowserTools, BROWSER_TOOL_DEFS } from '../tools/browserTools.js';
 import { executorAllowedAppqTools, validatorAllowedAppqTools } from '../tools/safety.js';
 import { fetchAppqToolDefs, createGatedAppqDispatcher } from '../tools/appqTools.js';
@@ -18,6 +19,13 @@ export interface JudgeTcOptions {
   runId: string;
   testCaseUuid: string;
   url: string;
+  /**
+   * Playwright storageState (cookies/localStorage) for an authenticated
+   * session, resolved once by the caller via resolveStorageState() and
+   * reused across every TC in a run — see src/tools/authState.ts. Only the
+   * executor's browser context uses this; the validator never launches one.
+   */
+  storageState?: BrowserContextOptions['storageState'];
   /**
    * Deliberately separate adapters, not one shared instance — see
    * config/env.ts's resolveModel(): the validator's judgment is closer to
@@ -42,14 +50,18 @@ export interface JudgeTcResult {
 }
 
 export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
-  const { runId, testCaseUuid, url, executorAdapter, validatorAdapter, budget, mandatoryImageCheck, dryRun, ringBufferCap, onEvent } = opts;
+  const { runId, testCaseUuid, url, storageState, executorAdapter, validatorAdapter, budget, mandatoryImageCheck, dryRun, ringBufferCap, onEvent } = opts;
 
   // Stage 1: executor. Drives a real browser; may write only evidence.
   const browser = await chromium.launch();
   // Captured before the browser closes below — Stage 2 never launches its
   // own browser, so this is the only point with access to the real version.
   const browserLabel = formatBrowserLabel(browser.version());
-  const page = await browser.newPage();
+  // browser.newPage() is Playwright's single-context convenience shortcut —
+  // switch to an explicit context so storageState has something to attach
+  // to. No behavior change when storageState is undefined (today's path).
+  const context = await browser.newContext(storageState ? { storageState } : {});
+  const page = await context.newPage();
   let executorResult: LoopResult;
   try {
     const browserTools = new PlaywrightBrowserTools(page, ringBufferCap);

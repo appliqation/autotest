@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.39.0",
+    "@appliqation/automation-sdk": "^2.7.0",
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",
     "openai": "^4.87.3",

@@ -26,6 +26,19 @@ jobs:
       # install Firefox/WebKit.
       - run: npx playwright install --with-deps chromium
 
+      # Only needed for a gated project — omit entirely (and drop --role
+      # below) for one that isn't. Populates the Playwright storageState
+      # judge --role reads; this client never performs login itself. Same
+      # env vars the customer's own `npx playwright test` CI step already
+      # needs (Project Settings -> Automation Authentication -> "download
+      # .env for CI").
+      # - name: Authenticate
+      #   env:
+      #     APPQ_PROJECT_<id>_<ROLE>_USERNAME: ${{ secrets.APPQ_PROJECT_<id>_<ROLE>_USERNAME }}
+      #     APPQ_PROJECT_<id>_<ROLE>_PASSWORD: ${{ secrets.APPQ_PROJECT_<id>_<ROLE>_PASSWORD }}
+      #     APPLIQATION_SUT_BASE_URL: ${{ vars.AUTOTEST_TARGET_URL }}
+      #   run: npx appq-auth-setup --project-id "${{ vars.AUTOTEST_PROJECT_ID }}" --role <name>
+
       - name: Run autotest
         env:
           APPQ_ORIGIN: https://appq.appliqation.io
@@ -43,6 +56,7 @@ jobs:
           # get_project_settings), so a stale AUTOTEST_TARGET_URL secret can
           # never silently diverge from what --environment actually points
           # at in appq.
+          # Add --role <name> here if the "Authenticate" step above is enabled.
           npx tsx src/cli/index.ts judge \
             --scenario-id "${{ vars.AUTOTEST_SCENARIO_ID }}" \
             --environment "${{ vars.AUTOTEST_ENVIRONMENT }}" \
