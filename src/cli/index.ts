@@ -22,6 +22,8 @@ import { parseCoveragePolicy, shouldRunAgenticCoverage } from '../orchestrator/c
 import { pollTestResults } from '../orchestrator/pollResults.js';
 import { printJsonSummary, printHumanSummary, exitCodeFor } from './output.js';
 import { resolveStorageState } from '../tools/authState.js';
+import { knownRolesForProject, inferRole, parseScenarioTcList } from '../tools/roleInference.js';
+import type { TcInfo } from '../tools/roleInference.js';
 import type { TcOutcome } from './output.js';
 import type { LoopResult } from '../engine/loop.js';
 import type { ProviderAdapter, ToolDispatcher } from '../types.js';
@@ -104,15 +106,17 @@ function resolveScenarioId(opts: { scenarioId?: string; testCaseUuid?: string })
  * project_id is always derived, never accepted as a separate input — a
  * scenario belongs to exactly one project, so a caller-supplied value that
  * diverges from the real one can only be wrong. get_scenario needs only
- * scenario_id; its response always includes "Project ID: N".
+ * scenario_id; its response always includes "Project ID: N" plus each TC's
+ * name/UUID/tag — fetched once and reused for role inference too, rather
+ * than a second call for the same data.
  */
-async function resolveProjectId(scenarioId: number): Promise<number> {
+async function fetchScenarioInfo(scenarioId: number): Promise<{ projectId: number; tcs: TcInfo[] }> {
   const result = await callTool('get_scenario', { scenario_id: scenarioId });
-  if (!result.ok) throw new Error(`get_scenario failed while resolving the project for scenario ${scenarioId}: ${result.text}`);
+  if (!result.ok) throw new Error(`get_scenario failed while resolving scenario ${scenarioId}: ${result.text}`);
   const match = result.text.match(/Project ID:\s*(\d+)/);
   if (!match) throw new Error(`Could not find a project ID in get_scenario's response for scenario ${scenarioId}.`);
   console.error(`[setup] project ${match[1]} (scenario ${scenarioId})`);
-  return Number(match[1]);
+  return { projectId: Number(match[1]), tcs: parseScenarioTcList(result.text) };
 }
 
 /**
@@ -283,12 +287,15 @@ program
       const dryRun = opts.dryRun ?? false;
 
       const scenarioId = resolveScenarioId(opts);
-      const projectId = await resolveProjectId(scenarioId);
+      const { projectId, tcs } = await fetchScenarioInfo(scenarioId);
       const url = await resolveUrl(opts.environment, projectId);
-      // Resolved once, reused for every TC in this invocation — this client
-      // never performs login itself, only reads the session file
-      // appq-auth-setup (or the customer's own CI) already produced.
-      const storageState = opts.role ? resolveStorageState(projectId, opts.role) : undefined;
+      // --role is an explicit override, resolved once and used uniformly —
+      // unchanged from before. Without it, per-TC role inference kicks in
+      // automatically wherever a TC's tag/name gives a confident signal
+      // (see roleInference.ts) — free to compute, just an env var scan, so
+      // always run regardless of whether it ends up mattering.
+      const knownRoles = knownRolesForProject(projectId);
+      const explicitStorageState = opts.role ? resolveStorageState(projectId, opts.role) : undefined;
       if (opts.role) console.error(`[setup] authenticated as role "${opts.role}"`);
       const runId = await resolveRun({
         runId: opts.runId,
@@ -301,6 +308,15 @@ program
       if (opts.testCaseUuid) {
         // Single-TC mode: unconditional executor/validator pair, no coverage decision.
         const testCaseUuid = opts.testCaseUuid;
+        let storageState = explicitStorageState;
+        if (!opts.role) {
+          const tcInfo = tcs.find((t) => t.testCaseUuid === testCaseUuid);
+          const inferredRole = tcInfo ? inferRole(tcInfo, knownRoles) : null;
+          if (inferredRole) {
+            storageState = resolveStorageState(projectId, inferredRole);
+            console.error(`[setup] authenticated as role "${inferredRole}" (inferred)`);
+          }
+        }
         const { executorResult, validatorResult } = await judgeTc({
           runId,
           testCaseUuid,
@@ -378,9 +394,22 @@ program
       // Agentic coverage, one TC at a time — sequential, not parallel: each
       // spins up its own browser, and there's no reason yet to pay the
       // resource-contention complexity of running several concurrently.
+      const inferredStorageStateCache = new Map<string, ReturnType<typeof resolveStorageState>>();
       for (const tcUuid of covered) {
         console.error(`\n--- judging ${tcUuid} ---`);
         try {
+          let storageState = explicitStorageState;
+          if (!opts.role) {
+            const tcInfo = tcs.find((t) => t.testCaseUuid === tcUuid);
+            const inferredRole = tcInfo ? inferRole(tcInfo, knownRoles) : null;
+            if (inferredRole) {
+              if (!inferredStorageStateCache.has(inferredRole)) {
+                inferredStorageStateCache.set(inferredRole, resolveStorageState(projectId, inferredRole));
+              }
+              storageState = inferredStorageStateCache.get(inferredRole);
+              console.error(`[${tcUuid}] authenticated as role "${inferredRole}" (inferred)`);
+            }
+          }
           const { validatorResult } = await judgeTc({
             runId,
             testCaseUuid: tcUuid,

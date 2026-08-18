@@ -101,6 +101,30 @@ real gated project among what this session has touched, so a real `storageState`
 getting an executor past a login wall is unconfirmed and should be checked against a real
 gated project before trusting it.
 
+**Per-TC role inference (mixed-role scenarios):** `--role` applies one role uniformly to
+every TC in an invocation, which is wrong for scenarios that legitimately mix roles (RBAC
+tests: "admin can see settings", "standard user gets 403 on the same page" both belong in
+one scenario). `src/tools/roleInference.ts` — when `--role` is omitted, `knownRolesForProject()`
+scans `process.env` for `APPQ_PROJECT_<id>_<ROLE>_USERNAME` keys already required by
+`appq-auth-setup` (no new appq lookup needed — role names are UI-validated lowercase/no-spaces,
+so the env var's role segment round-trips back exactly), then `inferRole()` checks each TC's
+own tag (`role:<name>`, `role:anonymous` explicitly meaning unauthenticated) or its title
+for a known role's name — mirrors the precedence already proven in production by
+`workers/automan-worker/src/services/AIScriptGenerator.js`'s `parseRoleFromTestcaseName()`,
+reused rather than reinvented, but deliberately never falls back to an LLM call (unlike that
+implementation) — role selection is a safety-adjacent decision, kept deterministic like every
+other one in this codebase. **No match is not an error** — the TC just runs unauthenticated;
+if it actually needed a session, the existing fail-closed executor/validator machinery
+already surfaces that honestly, so duplicating a hard stop here would wrongly block the
+common case where a mixed scenario has some TCs needing no auth at all. `fetchScenarioInfo()`
+(renamed from `resolveProjectId()`) now parses both project_id and the TC list (name/UUID/tag,
+via `parseScenarioTcList()`) from one `get_scenario` call rather than two. Verified: all three
+functions directly (env var scanning isolates per-project correctly, precedence gives the
+expected role for each case including the anonymous/no-signal ones, the real
+`GetScenarioTool.php` text format parses correctly) and live against DailyPulse — both
+"no roles configured" (fully inert, unchanged from before) and "roles configured but this
+TC's name doesn't match any" (falls through to unauthenticated, doesn't crash).
+
 **Config philosophy:** avoid hardcoded values wherever a real choice exists — see
 `src/config/env.ts` and `.env.example` for the full surface (models per provider per
 role, max tokens, all budget caps, ring buffer size, poll interval/timeout). The one
@@ -202,6 +226,11 @@ oversight to fix. Don't add a config knob for those.
   reading the installed package — only `./login` has a `.d.ts`) — `src/types/automation-sdk.d.ts`
   is a minimal ambient shim for just the functions actually used here, kept in sync with
   the real source rather than guessed.
+- `src/tools/roleInference.ts` — per-TC role auto-detection for mixed-role scenarios, used
+  when `--role` is omitted: `knownRolesForProject()` (env var scan), `inferRole()` (tag/name
+  precedence), `parseScenarioTcList()` (parses `get_scenario`'s TC list text — same
+  text-coupling trade-off `fetchScenarioInfo()` in `cli/index.ts` already accepts for
+  `Project ID: N`). See "Current phase" above for the full reasoning.
 
 ## Commands
 
@@ -216,8 +245,11 @@ oversight to fix. Don't add a config knob for those.
 - `npx tsx src/cli/index.ts judge --scenario-id <id> --environment <name> [--coverage <policy>] [--dry-run] [--json|--ci]`
   — a whole scenario (no `--test-case-uuid`), consolidated report across every TC.
   `--project-id`/`--url` are still not options — always derived from `--scenario-id`.
-- Add `--role <name>` to either form for a gated project — see `src/tools/authState.ts`
-  above. Omit entirely for ungated projects; nothing changes for them.
+- Add `--role <name>` to either form to force one role for every TC — see
+  `src/tools/authState.ts` above. Omit it and per-TC role auto-detection kicks in instead
+  (see `src/tools/roleInference.ts`) — each TC's own tag/name decides its role, or it runs
+  unauthenticated if none matches. Omit it entirely *and* have no `APPQ_PROJECT_<id>_*`
+  env vars set and nothing changes at all for ungated projects.
 - `.github/workflows/autotest.yml` — example CI wiring for `judge --dry-run --ci`; needs a
   dedicated appq service-account key (see the workflow's comments) that doesn't exist yet
 
