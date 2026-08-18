@@ -38,7 +38,11 @@ jobs:
           # executor needs more capability than the validator does.
           ANTHROPIC_MODEL: claude-haiku-4-5-20251001
         run: |
-          npx tsx src/cli/index.ts run \
+          # --project-id/--url are optional — derived from --scenario-id
+          # (via get_scenario) and --environment (via get_project_settings)
+          # if omitted. Pass them explicitly here to skip that lookup, or
+          # drop them if the project's settings are the source of truth.
+          npx tsx src/cli/index.ts judge \
             --scenario-id "${{ vars.AUTOTEST_SCENARIO_ID }}" \
             --project-id "${{ vars.AUTOTEST_PROJECT_ID }}" \
             --url "${{ vars.AUTOTEST_TARGET_URL }}" \

@@ -76,6 +76,51 @@ async function resolveRun(opts: { runId?: string; scenarioId?: string; projectId
   return parsed.run_id;
 }
 
+/** A TC UUID is always "{scenario_id}-{uuid4}" — appq's own tools parse it the same way (e.g. CreateDefectTool). */
+function scenarioIdFromTcUuid(tcUuid: string): number {
+  const prefix = tcUuid.split('-', 1)[0];
+  const id = Number(prefix);
+  if (!Number.isFinite(id) || id <= 0) {
+    throw new Error(`Could not derive a scenario ID from test case UUID "${tcUuid}" — expected "{scenario_id}-{uuid4}".`);
+  }
+  return id;
+}
+
+function resolveScenarioId(opts: { scenarioId?: string; testCaseUuid?: string }): number {
+  if (opts.scenarioId) return Number(opts.scenarioId);
+  if (opts.testCaseUuid) return scenarioIdFromTcUuid(opts.testCaseUuid);
+  throw new Error('--scenario-id is required (or pass --test-case-uuid, which encodes it).');
+}
+
+/** get_scenario needs only scenario_id — its response always includes "Project ID: N", parsed out here. */
+async function resolveProjectId(opts: { projectId?: string }, scenarioId: number): Promise<number> {
+  if (opts.projectId) return Number(opts.projectId);
+  const result = await callTool('get_scenario', { scenario_id: scenarioId });
+  if (!result.ok) throw new Error(`get_scenario failed while deriving --project-id: ${result.text}`);
+  const match = result.text.match(/Project ID:\s*(\d+)/);
+  if (!match) throw new Error(`Could not find a project ID in get_scenario's response for scenario ${scenarioId}.`);
+  console.error(`[setup] derived project ${match[1]} from scenario ${scenarioId}`);
+  return Number(match[1]);
+}
+
+/** get_project_settings already stores a URL per named environment — no need to ask for both. */
+async function resolveUrl(opts: { url?: string; environment?: string }, projectId: number): Promise<string> {
+  if (opts.url) return opts.url;
+  if (!opts.environment) {
+    throw new Error('--url or --environment is required (the URL is looked up from the environment when --url is omitted).');
+  }
+  const result = await callTool('get_project_settings', { project_id: projectId });
+  if (!result.ok) throw new Error(`get_project_settings failed while deriving --url: ${result.text}`);
+  const settings = JSON.parse(result.text) as { environments?: Array<{ name: string; url: string }> };
+  const env = (settings.environments ?? []).find((e) => e.name === opts.environment);
+  if (!env) {
+    const available = (settings.environments ?? []).map((e) => e.name).join(', ') || '(none configured)';
+    throw new Error(`No environment named "${opts.environment}" on project ${projectId}. Available: ${available}`);
+  }
+  console.error(`[setup] derived url ${env.url} from environment "${opts.environment}"`);
+  return env.url;
+}
+
 const MANDATORY_IMAGE_OPTION = [
   '--mandatory-image-check',
   "Fetch and attach every step's screenshot to the validator unconditionally, instead of leaving it to the " +
@@ -154,118 +199,48 @@ program
 program
   .command('judge')
   .description(
-    'Execute one test case, then judge it, as two genuinely separate invocations against the real ' +
-      'appq:autotest-executor / appq:autotest-validator workflows — no shared context between them, the ' +
-      "validator never sees the executor's own conversation, only what it explicitly submitted as evidence.",
+    'Judge one test case (--test-case-uuid) or a whole scenario (--scenario-id, no --test-case-uuid), as ' +
+      'genuinely separate executor/validator invocations against appq:autotest-executor / -validator — no ' +
+      "shared context between them, the validator never sees the executor's own conversation, only what it " +
+      'explicitly submitted as evidence. In whole-scenario mode, a coverage policy decides per TC whether the ' +
+      'agentic pair runs at all, alongside whatever the deterministic canonical-script pipeline already does ' +
+      'automatically; the report then covers every TC either way. scenario_id/project_id/url are all optional ' +
+      '— derived automatically wherever appq already knows the answer (see each option below).',
   )
-  .requiredOption('--test-case-uuid <uuid>', 'test case UUID to execute')
-  .requiredOption('--url <url>', 'starting URL for the test case')
-  .option('--run-id <id>', 'reuse an existing run instead of creating one')
-  .option('--scenario-id <id>', 'scenario ID (required to create a new run if --run-id is omitted)')
-  .option('--project-id <id>', 'project ID (required to create a new run if --run-id is omitted)')
+  .option(
+    '--test-case-uuid <uuid>',
+    'test case UUID to judge. Omit to judge a whole scenario instead (then --scenario-id is required).',
+  )
+  .option(
+    '--scenario-id <id>',
+    'scenario ID. Required in whole-scenario mode; auto-derived from --test-case-uuid otherwise (the UUID is ' +
+      'always "{scenario_id}-{uuid4}").',
+  )
+  .option(
+    '--project-id <id>',
+    'project ID. Auto-derived via get_scenario if omitted — appq already knows which project a scenario ' +
+      'belongs to.',
+  )
+  .option(
+    '--url <url>',
+    'starting URL. Auto-derived from --environment via get_project_settings if omitted — every configured ' +
+      'environment already has a URL, no need to state both.',
+  )
   .option(
     '--environment <name>',
-    'environment name to create the run against (required if --run-id is omitted and the project has no ' +
-      'auto-detectable "Local" environment — appq will list the available names in its error if you omit this)',
+    'environment name. Required if --url is omitted (used both to create the run and to look up its URL) — ' +
+      'appq will list the available names in its error if the one given doesn\'t match.',
   )
-  .option(...MANDATORY_IMAGE_OPTION)
-  .option(...DRY_RUN_OPTION)
-  .option(...JSON_OPTION)
-  .option(...CI_OPTION)
-  .action(
-    async (opts: {
-      testCaseUuid: string;
-      url: string;
-      runId?: string;
-      scenarioId?: string;
-      projectId?: string;
-      environment?: string;
-      mandatoryImageCheck?: boolean;
-      dryRun?: boolean;
-      json?: boolean;
-      ci?: boolean;
-    }) => {
-      const json = (opts.json ?? false) || (opts.ci ?? false);
-      const executorAdapter = buildAdapter('executor');
-      const validatorAdapter = buildAdapter('validator');
-      const runId = await resolveRun(opts);
-      const mandatoryImageCheck = opts.mandatoryImageCheck ?? config.mandatoryImageCheck;
-      const dryRun = opts.dryRun ?? false;
-      console.error(
-        `[setup] image check: ${mandatoryImageCheck ? 'mandatory' : 'on-demand'}, dry-run: ${dryRun}`,
-      );
-
-      const { executorResult, validatorResult } = await judgeTc({
-        runId,
-        testCaseUuid: opts.testCaseUuid,
-        url: opts.url,
-        executorAdapter,
-        validatorAdapter,
-        budget: config.budget,
-        mandatoryImageCheck,
-        dryRun,
-        ringBufferCap: config.evidenceRingBufferCap,
-        onEvent: (stage, e) => logEvent(`[${stage}] `)(e),
-      });
-
-      if (!json) {
-        printResult('Executor report', executorResult);
-        printResult('Validator report', validatorResult);
-      }
-
-      // The validator writes its own verdict via update_run_results as its
-      // last phase — poll appq's own run matrix for the authoritative status
-      // rather than trying to parse it back out of the report prose.
-      let status = 'dry-run';
-      let errorMessage: string | undefined;
-      if (!dryRun) {
-        const polled = await pollTestResults({
-          runId,
-          scenarioId: opts.scenarioId ? Number(opts.scenarioId) : undefined,
-          wantUuids: new Set([opts.testCaseUuid]),
-          timeoutMs: config.pollTimeoutMs,
-          intervalMs: config.pollIntervalMs,
-        });
-        const tc = polled.get(opts.testCaseUuid);
-        status = tc?.status ?? 'pending';
-        errorMessage = tc?.errorMessage;
-      }
-
-      const outcome: TcOutcome = { testCaseUuid: opts.testCaseUuid, path: 'agentic', status, errorMessage };
-      const summary = { runId, dryRun, results: [outcome] };
-      if (json) printJsonSummary(summary);
-      else printHumanSummary(summary);
-
-      process.exitCode = exitCodeFor(summary);
-    },
-  );
-
-program
-  .command('run')
-  .description(
-    'Full-scenario autotest: creates (or reuses) a run, checks canonical-script readiness for every test ' +
-      "case, and applies a coverage policy to decide per TC whether agentic coverage (judge's executor/" +
-      'validator pair) also runs alongside whatever the deterministic pipeline does automatically. Prints one ' +
-      'consolidated report across every test case in the scenario.',
-  )
-  .requiredOption('--scenario-id <id>', 'scenario ID to run')
-  .requiredOption('--project-id <id>', 'project ID')
-  .requiredOption('--url <url>', 'starting URL, used for every TC that gets agentic coverage')
   .option('--run-id <id>', 'reuse an existing run instead of creating one')
-  .option(
-    '--environment <name>',
-    'environment name to create the run against (required if --run-id is omitted and the project has no ' +
-      'auto-detectable "Local" environment)',
-  )
   .option(
     '--coverage <policy>',
-    'always | on-script-absence | sampled:N | external — see the plan doc\'s "coverage decision" for why this ' +
-      'is never hardcoded. Defaults to on-script-absence: a conservative bootstrap choice, not a product stance.',
+    'always | on-script-absence | sampled:N | external — only meaningful in whole-scenario mode; see the plan ' +
+      'doc\'s "coverage decision" for why this is never hardcoded. Defaults to on-script-absence.',
     'on-script-absence',
   )
   .option(
     '--poll-timeout-ms <ms>',
-    'how long to wait for the deterministic path to settle before reporting. Defaults to POLL_TIMEOUT_MS.',
+    'whole-scenario mode: how long to wait for the deterministic path to settle before reporting. Defaults to POLL_TIMEOUT_MS.',
   )
   .option(...MANDATORY_IMAGE_OPTION)
   .option(...DRY_RUN_OPTION)
@@ -273,11 +248,12 @@ program
   .option(...CI_OPTION)
   .action(
     async (opts: {
-      scenarioId: string;
-      projectId: string;
-      url: string;
-      runId?: string;
+      testCaseUuid?: string;
+      scenarioId?: string;
+      projectId?: string;
+      url?: string;
       environment?: string;
+      runId?: string;
       coverage: string;
       pollTimeoutMs?: string;
       mandatoryImageCheck?: boolean;
@@ -288,22 +264,71 @@ program
       const json = (opts.json ?? false) || (opts.ci ?? false);
       const executorAdapter = buildAdapter('executor');
       const validatorAdapter = buildAdapter('validator');
-      const scenarioId = Number(opts.scenarioId);
-      const projectId = Number(opts.projectId);
-      const policy = parseCoveragePolicy(opts.coverage);
       const mandatoryImageCheck = opts.mandatoryImageCheck ?? config.mandatoryImageCheck;
       const dryRun = opts.dryRun ?? false;
-      const pollTimeoutMs = opts.pollTimeoutMs ? Number(opts.pollTimeoutMs) : config.pollTimeoutMs;
 
+      const scenarioId = resolveScenarioId(opts);
+      const projectId = await resolveProjectId(opts, scenarioId);
+      const url = await resolveUrl(opts, projectId);
       const runId = await resolveRun({
         runId: opts.runId,
-        scenarioId: opts.scenarioId,
-        projectId: opts.projectId,
+        scenarioId: String(scenarioId),
+        projectId: String(projectId),
         environment: opts.environment,
       });
-      console.error(
-        `[setup] coverage: ${opts.coverage}, image check: ${mandatoryImageCheck ? 'mandatory' : 'on-demand'}, dry-run: ${dryRun}`,
-      );
+      console.error(`[setup] image check: ${mandatoryImageCheck ? 'mandatory' : 'on-demand'}, dry-run: ${dryRun}`);
+
+      if (opts.testCaseUuid) {
+        // Single-TC mode: unconditional executor/validator pair, no coverage decision.
+        const testCaseUuid = opts.testCaseUuid;
+        const { executorResult, validatorResult } = await judgeTc({
+          runId,
+          testCaseUuid,
+          url,
+          executorAdapter,
+          validatorAdapter,
+          budget: config.budget,
+          mandatoryImageCheck,
+          dryRun,
+          ringBufferCap: config.evidenceRingBufferCap,
+          onEvent: (stage, e) => logEvent(`[${stage}] `)(e),
+        });
+
+        if (!json) {
+          printResult('Executor report', executorResult);
+          printResult('Validator report', validatorResult);
+        }
+
+        // The validator writes its own verdict via update_run_results as its
+        // last phase — poll appq's own run matrix for the authoritative
+        // status rather than trying to parse it back out of the report prose.
+        let status = 'dry-run';
+        let errorMessage: string | undefined;
+        if (!dryRun) {
+          const polled = await pollTestResults({
+            runId,
+            scenarioId,
+            wantUuids: new Set([testCaseUuid]),
+            timeoutMs: config.pollTimeoutMs,
+            intervalMs: config.pollIntervalMs,
+          });
+          const tc = polled.get(testCaseUuid);
+          status = tc?.status ?? 'pending';
+          errorMessage = tc?.errorMessage;
+        }
+
+        const outcome: TcOutcome = { testCaseUuid, path: 'agentic', status, errorMessage };
+        const summary = { runId, scenarioId, dryRun, results: [outcome] };
+        if (json) printJsonSummary(summary);
+        else printHumanSummary(summary);
+        process.exitCode = exitCodeFor(summary);
+        return;
+      }
+
+      // Whole-scenario mode.
+      const policy = parseCoveragePolicy(opts.coverage);
+      const pollTimeoutMs = opts.pollTimeoutMs ? Number(opts.pollTimeoutMs) : config.pollTimeoutMs;
+      console.error(`[setup] coverage: ${opts.coverage}`);
 
       const readinessResult = await callTool('get_automation_readiness', { scenario_id: scenarioId, project_id: projectId });
       if (!readinessResult.ok) throw new Error(`get_automation_readiness failed: ${readinessResult.text}`);
@@ -338,7 +363,7 @@ program
           const { validatorResult } = await judgeTc({
             runId,
             testCaseUuid: tcUuid,
-            url: opts.url,
+            url,
             executorAdapter,
             validatorAdapter,
             budget: config.budget,

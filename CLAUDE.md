@@ -46,17 +46,29 @@ design holding up under genuine model flakiness, not just the happy path. `.env`
 real credentials (with Haiku set for both roles, to keep cost down for the first live
 runs).
 
-**Phase 6 (CI polish) done:** `--json`/`--ci` on both `judge` and `run` (see
-`src/cli/output.ts`) print a single structured summary on stdout instead of the human
-table, and the process exits non-zero whenever a non-dry-run test case comes back
-failed/blocked/never-settled — `judge` now also polls `get_test_results` after
-`judgeTc()` (previously only `run` did) so its exit code reflects appq's own authoritative
-status rather than being parsed out of the validator's report prose. Example wiring at
+**Phase 6 (CI polish) done:** `--json`/`--ci` (see `src/cli/output.ts`) print a single
+structured summary on stdout instead of the human table, and the process exits non-zero
+whenever a non-dry-run test case comes back failed/blocked/never-settled — `judge` polls
+`get_test_results` after judging so its exit code reflects appq's own authoritative status
+rather than being parsed out of the validator's report prose. Example wiring at
 `.github/workflows/autotest.yml` (runs `--dry-run --ci`, uploads the JSON as an artifact —
 flip `--dry-run` off once trusted against a real project). Not done: an automated test
 suite for this client's own code (vitest/jest), and the dedicated CI service-account
 key the workflow example expects (`AUTOTEST_APPQ_API_KEY`) doesn't exist yet in appq —
 someone needs to actually create that account and scope its project membership.
+
+**`run` merged into `judge`:** originally two separate commands (`judge` for one TC,
+`run` for a whole scenario) — merged into one, since `run` was always just `judge`'s exact
+same `judgeTc()` call looped with a coverage-policy decision layered on top, not a
+genuinely different mechanism. `judge --test-case-uuid <uuid>` is single-TC mode
+(unconditional executor/validator pair); `judge --scenario-id <id>` with no
+`--test-case-uuid` is whole-scenario mode (coverage policy decides per TC). Also:
+`--scenario-id`/`--project-id`/`--url` are now all optional, auto-derived wherever appq
+already has the answer — scenario_id from the TC UUID's own `{scenario_id}-{uuid4}`
+format, project_id via `get_scenario`, url via `get_project_settings`'s per-environment
+URL given `--environment`. Verified live against real DailyPulse data (project/url
+correctly derived, full executor loop ran normally on the derived values) — see
+`resolveScenarioId`/`resolveProjectId`/`resolveUrl` in `src/cli/index.ts`.
 
 **Config philosophy:** avoid hardcoded values wherever a real choice exists — see
 `src/config/env.ts` and `.env.example` for the full surface (models per provider per
@@ -69,17 +81,20 @@ oversight to fix. Don't add a config knob for those.
 ## Where to find what
 
 - `src/cli/` — CLI entrypoints. `runman` (Phase 1) proves the engine against the
-  existing, real `appq:runman` workflow. `judge` (Phase 2) runs one test case as two
-  genuinely separate `runWorkflow()` invocations — `appq:autotest-executor` then
+  existing, real `appq:runman` workflow. `judge` (Phase 2 + 5, merged) runs one test case
+  or a whole scenario, branching on whether `--test-case-uuid` is given. Single-TC mode:
+  two genuinely separate `runWorkflow()` invocations — `appq:autotest-executor` then
   `appq:autotest-validator` — with a plain, non-LLM-mediated `update_run_results`
-  `create_run` call in between if no `--run-id` is given. `run` (Phase 5) applies the same
-  pattern across a whole scenario: fetches `get_automation_readiness` once, applies
-  `--coverage` per TC, calls `judgeTc()` (see `src/orchestrator/`) for the TCs that need
-  agentic coverage, then polls `get_test_results` once for the full TC list — that single
-  poll picks up both the deterministic pipeline's own results and whatever the validator
-  already wrote itself, so no special-casing is needed between the two paths.
+  `create_run` call in between if no `--run-id` is given. Whole-scenario mode: fetches
+  `get_automation_readiness` once, applies `--coverage` per TC, calls `judgeTc()` (see
+  `src/orchestrator/`) for the TCs that need agentic coverage, then polls
+  `get_test_results` once for the full TC list — that single poll picks up both the
+  deterministic pipeline's own results and whatever the validator already wrote itself, so
+  no special-casing is needed between the two paths. `resolveScenarioId`/`resolveProjectId`/
+  `resolveUrl` (top of `index.ts`) derive scenario_id/project_id/url wherever appq already
+  knows the answer, so only what's genuinely required needs to be typed.
 - `src/orchestrator/` — `judgeTc.ts` (the executor→validator pair for one TC, factored out
-  of `judge` so `run` doesn't duplicate it), `coveragePolicy.ts` (`always` /
+  so `judge`'s two modes share exactly one implementation), `coveragePolicy.ts` (`always` /
   `on-script-absence` / `sampled:N` / `external` — never hardcoded, see the plan's
   "coverage decision"; `external` throws if selected without a decider function wired up —
   a deliberate hook for a future orchestrating agent, not a silent fallback),
@@ -134,23 +149,26 @@ oversight to fix. Don't add a config knob for those.
   destructive-action gate — the validator's own workflow prose is what decides to write,
   so "don't write" has to be enforced below that, not asked of it.
 - `src/cli/output.ts` — `--json`/`--ci`'s renderer: a single structured `RunSummary` (one
-  TC for `judge`, all of them for `run`) either printed as JSON or as the human table, plus
-  `exitCodeFor()` — non-zero whenever a non-dry-run result is `failed`/`blocked`/`pending`
-  (poll-timeout), so a CI job can gate on the process exit code without scraping prose.
-  Progress logs (`onEvent` → `console.error`) are untouched by this; it only changes the
-  final-outcome rendering on stdout.
+  TC in single-TC mode, all of them in whole-scenario mode) either printed as JSON or as
+  the human table, plus `exitCodeFor()` — non-zero whenever a non-dry-run result is
+  `failed`/`blocked`/`pending` (poll-timeout), so a CI job can gate on the process exit
+  code without scraping prose. Progress logs (`onEvent` → `console.error`) are untouched
+  by this; it only changes the final-outcome rendering on stdout.
 
 ## Commands
 
 - `npm run dev -- <command>` — run the CLI via `tsx` without building
 - `npm run build` / `npm run typecheck`
 - `npx tsx src/cli/index.ts runman --url <target> --project-id <id>` — Phase 1 proof run
-- `npx tsx src/cli/index.ts judge --test-case-uuid <uuid> --url <target> --scenario-id <id> --project-id <id>`
-  — one TC (add `--run-id` to reuse an existing run, `--dry-run` to suppress writeback,
-  `--json`/`--ci` for a structured summary + CI-friendly exit code)
-- `npx tsx src/cli/index.ts run --scenario-id <id> --project-id <id> --url <target> [--coverage <policy>] [--dry-run] [--json|--ci]`
-  — a whole scenario, consolidated report across every TC
-- `.github/workflows/autotest.yml` — example CI wiring for `run --dry-run --ci`; needs a
+- `npx tsx src/cli/index.ts judge --test-case-uuid <uuid> [--environment <name>]`
+  — one TC. `--scenario-id`/`--project-id`/`--url` are optional (auto-derived from the
+  UUID/`get_scenario`/`get_project_settings`); pass `--run-id` to reuse an existing run,
+  `--dry-run` to suppress writeback, `--json`/`--ci` for a structured summary + CI-friendly
+  exit code.
+- `npx tsx src/cli/index.ts judge --scenario-id <id> [--environment <name>] [--coverage <policy>] [--dry-run] [--json|--ci]`
+  — a whole scenario (no `--test-case-uuid`), consolidated report across every TC.
+  `--project-id`/`--url` are still optional/auto-derived the same way.
+- `.github/workflows/autotest.yml` — example CI wiring for `judge --dry-run --ci`; needs a
   dedicated appq service-account key (see the workflow's comments) that doesn't exist yet
 
 ## Config
