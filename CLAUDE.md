@@ -52,10 +52,26 @@ whenever a non-dry-run test case comes back failed/blocked/never-settled — `ju
 `get_test_results` after judging so its exit code reflects appq's own authoritative status
 rather than being parsed out of the validator's report prose. Example wiring at
 `.github/workflows/autotest.yml` (runs `--dry-run --ci`, uploads the JSON as an artifact —
-flip `--dry-run` off once trusted against a real project). Not done: an automated test
-suite for this client's own code (vitest/jest), and the dedicated CI service-account
-key the workflow example expects (`AUTOTEST_APPQ_API_KEY`) doesn't exist yet in appq —
-someone needs to actually create that account and scope its project membership.
+flip `--dry-run` off once trusted against a real project). Not done: the dedicated CI
+service-account key the workflow example expects (`AUTOTEST_APPQ_API_KEY`) doesn't exist
+yet in appq — someone needs to actually create that account and scope its project
+membership.
+
+**Automated tests (vitest):** `npm test`. Started with the pure-logic/safety-invariant
+modules first, not broad coverage — these are the pieces where a regression would be
+silent and expensive rather than immediately obvious: `tools/safety.ts` (destructive-action
+gate, executor/validator write boundary), `tools/appqTools.ts` (the actual dispatch-level
+enforcement — asserts a disallowed call never reaches `callTool` at all, not just that an
+error surfaces somewhere), `tools/dryRun.ts`, `cli/output.ts` (exit-code logic),
+`orchestrator/coveragePolicy.ts`, `tools/roleInference.ts`, `tools/authState.ts`,
+`tools/browserLabel.ts`, `tools/screenshotViewer.ts`, `orchestrator/pollResults.ts` (fake
+timers, not real sleeps), `engine/budget.ts`, `cli/resolvers.ts`. `cli/resolvers.ts` is a
+new file — `resolveRun`/`scenarioIdFromTcUuid`/`resolveScenarioId`/`fetchScenarioInfo`/
+`resolveUrl` were extracted out of `cli/index.ts` specifically to make them importable in
+isolation without triggering that file's top-level `program.parseAsync(process.argv)` side
+effect. Not yet covered: `engine/loop.ts`, `orchestrator/judgeTc.ts`, `tools/browserTools.ts`,
+`providers/*.ts` — all real integration-test territory (live Playwright pages, live
+provider SDKs), a reasonable next slice but a different kind of test than what's here.
 
 **`run` merged into `judge`:** originally two separate commands (`judge` for one TC,
 `run` for a whole scenario) — merged into one, since `run` was always just `judge`'s exact
@@ -65,8 +81,8 @@ genuinely different mechanism. `judge --test-case-uuid <uuid>` is single-TC mode
 `--test-case-uuid` is whole-scenario mode (coverage policy decides per TC).
 
 `--project-id` and `--url` are **not CLI options at all** — always derived, never
-accepted as separate caller-supplied inputs (`resolveProjectId`/`resolveUrl` in
-`src/cli/index.ts`): project_id via `get_scenario` (a scenario belongs to exactly one
+accepted as separate caller-supplied inputs (`fetchScenarioInfo`/`resolveUrl` in
+`src/cli/resolvers.ts`): project_id via `get_scenario` (a scenario belongs to exactly one
 project, so there's no legitimate override case), url via `get_project_settings`'s
 per-environment URL given `--environment` (now a `requiredOption`). Deliberate, not an
 oversight: a caller-supplied `--project-id` that diverged from the real one would at
@@ -145,10 +161,12 @@ oversight to fix. Don't add a config knob for those.
   `src/orchestrator/`) for the TCs that need agentic coverage, then polls
   `get_test_results` once for the full TC list — that single poll picks up both the
   deterministic pipeline's own results and whatever the validator already wrote itself, so
-  no special-casing is needed between the two paths. `resolveScenarioId`/`resolveProjectId`/
-  `resolveUrl` (top of `index.ts`) always derive project_id/url (never accepted as CLI
-  options — see "Current phase" above for why) and scenario_id from the TC UUID in
-  single-TC mode.
+  no special-casing is needed between the two paths.
+- `src/cli/resolvers.ts` — `resolveScenarioId`/`fetchScenarioInfo`/`resolveUrl`/`resolveRun`,
+  extracted out of `index.ts` so they're testable in isolation (importing `index.ts` itself
+  would trigger its top-level `program.parseAsync(process.argv)`). project_id/url are always
+  derived, never accepted as CLI options — see "Current phase" above for why; scenario_id is
+  derived from the TC UUID in single-TC mode.
 - `src/orchestrator/` — `judgeTc.ts` (the executor→validator pair for one TC, factored out
   so `judge`'s two modes share exactly one implementation), `coveragePolicy.ts` (`always` /
   `on-script-absence` / `sampled:N` / `external` — never hardcoded, see the plan's
@@ -229,13 +247,14 @@ oversight to fix. Don't add a config knob for those.
 - `src/tools/roleInference.ts` — per-TC role auto-detection for mixed-role scenarios, used
   when `--role` is omitted: `knownRolesForProject()` (env var scan), `inferRole()` (tag/name
   precedence), `parseScenarioTcList()` (parses `get_scenario`'s TC list text — same
-  text-coupling trade-off `fetchScenarioInfo()` in `cli/index.ts` already accepts for
+  text-coupling trade-off `fetchScenarioInfo()` in `cli/resolvers.ts` already accepts for
   `Project ID: N`). See "Current phase" above for the full reasoning.
 
 ## Commands
 
 - `npm run dev -- <command>` — run the CLI via `tsx` without building
 - `npm run build` / `npm run typecheck`
+- `npm test` / `npm run test:watch` — vitest, colocated `src/**/*.test.ts` files
 - `npx tsx src/cli/index.ts runman --url <target> --project-id <id>` — Phase 1 proof run
 - `npx tsx src/cli/index.ts judge --test-case-uuid <uuid> --environment <name>`
   — one TC. `--environment` is required (its URL is looked up, never taken directly);
