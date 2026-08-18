@@ -39,7 +39,11 @@ function buildAdapter(role: 'executor' | 'validator'): ProviderAdapter {
 
 function logEvent(prefix: string) {
   return (e: { type: string; detail?: unknown }) => {
-    if (e.type === 'tool') {
+    if (e.type === 'assistant') {
+      const text = ((e.detail as string) ?? '').trim();
+      // Many tool-calling turns return no accompanying text — nothing to show.
+      if (text) console.error(`${prefix}[thinking] ${text}`);
+    } else if (e.type === 'tool') {
       const d = e.detail as { name: string; result: string };
       console.error(`${prefix}[tool] ${d.name} -> ${d.result.slice(0, 200)}`);
     } else if (e.type === 'log') {
