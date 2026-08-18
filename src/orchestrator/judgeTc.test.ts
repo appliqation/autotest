@@ -186,9 +186,9 @@ describe('judgeTc', () => {
   });
 
   it(
-    'FINDING: in dry-run mode, the logged create_defect preview shows the model\'s own (uncorrected) browser ' +
-      "value, not the real one — dryRun wraps outermost, so it intercepts before the browser-label correction " +
-      'ever runs. The preview does not accurately reflect what a real (non-dry-run) call would actually send.',
+    'in dry-run mode, the logged create_defect preview shows the CORRECTED browser label, matching what a ' +
+      'real call would actually send — browser-label correction must be outermost, applied before dry-run\'s ' +
+      "interception decides what to log, or the preview would misrepresent reality.",
     async () => {
       const { browser } = fakeBrowserChain();
       mockLaunch.mockResolvedValue(browser);
@@ -218,10 +218,9 @@ describe('judgeTc', () => {
 
       // The real appq call never happens in dry-run mode at all.
       expect(mockCallTool).not.toHaveBeenCalledWith('create_defect', expect.anything());
-      // The logged preview still shows the model's raw, uncorrected value.
+      // But the logged preview now reflects the corrected browser label.
       const loggedPreview = errSpy.mock.calls.map((c) => c[0]).find((l) => typeof l === 'string' && l.includes('create_defect'));
-      expect(loggedPreview).toContain('"browser": "Chromium"');
-      expect(loggedPreview).not.toContain('Chromium 133');
+      expect(loggedPreview).toContain('"browser": "Chromium 133"');
     },
   );
 });

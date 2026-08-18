@@ -65,15 +65,24 @@ export class EvidenceCapture {
     if (arr.length > this.ringBufferCap) arr.shift();
   }
 
+  private consumeConsoleDeltas(): ConsoleEntry[] {
+    const delta = this.console.slice(this.consoleCursor);
+    this.consoleCursor = this.console.length;
+    return delta;
+  }
+
+  private consumeNetworkDeltas(): NetworkEntry[] {
+    const delta = this.network.slice(this.networkCursor);
+    this.networkCursor = this.network.length;
+    return delta;
+  }
+
   /** Captures a step's evidence bundle: screenshot + a11y snapshot + deltas since the last step. */
   async captureStep(stepIndex: number, action: string, blocked?: { reason: string }): Promise<StepEvidence> {
     const screenshotPng = await this.page.screenshot({ type: 'png' });
     const accessibilitySnapshot = await this.page.ariaSnapshot({ mode: 'ai' });
-
-    const consoleDeltas = this.console.slice(this.consoleCursor);
-    const networkDeltas = this.network.slice(this.networkCursor);
-    this.consoleCursor = this.console.length;
-    this.networkCursor = this.network.length;
+    const consoleDeltas = this.consumeConsoleDeltas();
+    const networkDeltas = this.consumeNetworkDeltas();
 
     const entry: StepEvidence = { stepIndex, action, screenshotPng, accessibilitySnapshot, consoleDeltas, networkDeltas, blocked };
     this.steps.push(entry);
@@ -86,5 +95,22 @@ export class EvidenceCapture {
 
   getSteps(): StepEvidence[] {
     return this.steps;
+  }
+
+  /**
+   * Console entries logged since the last time this (or captureStep) was
+   * called — the direct read path for browser_console_messages, which
+   * doesn't need a full step bundle (screenshot + a11y snapshot) just to
+   * report deltas. Shares the same cursor as captureStep(); harmless today
+   * since nothing calls captureStep() in this codebase's actual dispatch
+   * flow, but worth knowing if that ever changes.
+   */
+  getConsoleDeltas(): ConsoleEntry[] {
+    return this.consumeConsoleDeltas();
+  }
+
+  /** Network entries observed since the last check — see getConsoleDeltas(). */
+  getNetworkDeltas(): NetworkEntry[] {
+    return this.consumeNetworkDeltas();
   }
 }

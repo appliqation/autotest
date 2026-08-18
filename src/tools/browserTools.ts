@@ -172,14 +172,10 @@ export class PlaywrightBrowserTools {
         }
       }
       case 'browser_console_messages': {
-        const steps = this.evidence.getSteps();
-        const last = steps[steps.length - 1];
-        return { ok: true, text: JSON.stringify(last?.consoleDeltas ?? []) };
+        return { ok: true, text: JSON.stringify(this.evidence.getConsoleDeltas()) };
       }
       case 'browser_network_requests': {
-        const steps = this.evidence.getSteps();
-        const last = steps[steps.length - 1];
-        return { ok: true, text: JSON.stringify(last?.networkDeltas ?? []) };
+        return { ok: true, text: JSON.stringify(this.evidence.getNetworkDeltas()) };
       }
       case 'browser_wait_for': {
         if (args.text) {

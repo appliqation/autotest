@@ -19,8 +19,11 @@ function fakeLocator() {
 
 function fakePage() {
   const locator = fakeLocator();
+  const handlers: Record<string, Array<(...args: unknown[]) => unknown>> = {};
   const page = {
-    on: vi.fn(),
+    on: vi.fn((event: string, handler: (...args: unknown[]) => unknown) => {
+      (handlers[event] ??= []).push(handler);
+    }),
     goto: vi.fn().mockResolvedValue(undefined),
     goBack: vi.fn().mockResolvedValue(undefined),
     ariaSnapshot: vi.fn().mockResolvedValue('- generic [ref=e1]:\n  - textbox [ref=e2]'),
@@ -30,7 +33,15 @@ function fakePage() {
     getByText: vi.fn().mockReturnValue({ waitFor: vi.fn().mockResolvedValue(undefined) }),
     waitForTimeout: vi.fn().mockResolvedValue(undefined),
   };
-  return { page: page as unknown as Page, locator };
+  return { page: page as unknown as Page, locator, handlers };
+}
+
+function fireConsole(handlers: ReturnType<typeof fakePage>['handlers'], type: string, text: string) {
+  for (const h of handlers.console ?? []) h({ type: () => type, text: () => text });
+}
+
+function fireRequestFailed(handlers: ReturnType<typeof fakePage>['handlers'], method: string, url: string) {
+  for (const h of handlers.requestfailed ?? []) h({ method: () => method, url: () => url });
 }
 
 describe('PlaywrightBrowserTools', () => {
@@ -187,25 +198,38 @@ describe('PlaywrightBrowserTools', () => {
     expect(result.text).toMatch(/Unknown browser tool/);
   });
 
-  // Documents real, current behavior found while writing this suite — not
-  // asserting it's correct. EvidenceCapture.captureStep() is defined but
-  // never called anywhere in this codebase (grepped: zero call sites), so
-  // getSteps() is always empty and these two tools always return "[]"
-  // regardless of what the page actually did. Flagged to the user
-  // separately — this may mean the executor has been submitting empty
-  // console/network deltas to appq this whole time, independent of model
-  // behavior.
-  it('browser_console_messages currently always returns an empty array (captureStep is never invoked)', async () => {
+  it('browser_console_messages returns real console entries, not always []', async () => {
+    const { page, handlers } = fakePage();
+    const tools = new PlaywrightBrowserTools(page);
+    fireConsole(handlers, 'error', 'a real page error');
+    const result = await tools.dispatch('browser_console_messages', {});
+    expect(JSON.parse(result.text)).toEqual([{ type: 'error', text: 'a real page error', timestamp: expect.any(Number) }]);
+  });
+
+  it('browser_console_messages returns [] when nothing was logged since the last check', async () => {
     const { page } = fakePage();
     const tools = new PlaywrightBrowserTools(page);
     const result = await tools.dispatch('browser_console_messages', {});
     expect(result.text).toBe('[]');
   });
 
-  it('browser_network_requests currently always returns an empty array (captureStep is never invoked)', async () => {
-    const { page } = fakePage();
+  it('browser_network_requests returns real network entries, not always []', async () => {
+    const { page, handlers } = fakePage();
     const tools = new PlaywrightBrowserTools(page);
+    fireRequestFailed(handlers, 'POST', 'https://example.com/checkout');
     const result = await tools.dispatch('browser_network_requests', {});
-    expect(result.text).toBe('[]');
+    expect(JSON.parse(result.text)).toEqual([
+      { method: 'POST', url: 'https://example.com/checkout', status: undefined, timestamp: expect.any(Number) },
+    ]);
+  });
+
+  it('browser_console_messages only returns entries since the previous call, not the full history', async () => {
+    const { page, handlers } = fakePage();
+    const tools = new PlaywrightBrowserTools(page);
+    fireConsole(handlers, 'log', 'first');
+    await tools.dispatch('browser_console_messages', {});
+    fireConsole(handlers, 'log', 'second');
+    const result = await tools.dispatch('browser_console_messages', {});
+    expect(JSON.parse(result.text)).toEqual([{ type: 'log', text: 'second', timestamp: expect.any(Number) }]);
   });
 });

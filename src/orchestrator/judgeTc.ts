@@ -95,9 +95,16 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
   const screenshotViewer = new ScreenshotViewer(mandatoryImageCheck);
   const validatorToolDefs = await fetchAppqToolDefs(validatorAllowedAppqTools());
   const gatedValidatorAppq = createGatedAppqDispatcher(validatorAllowedAppqTools());
-  const dispatch = createDryRunDispatcher(
-    createBrowserLabelDispatcher(screenshotViewer.wrapDispatch(gatedValidatorAppq), browserLabel),
-    dryRun,
+  // Browser-label correction must be OUTERMOST, applied before dry-run's
+  // interception decides what to log — otherwise a dry-run's "would call
+  // create_defect with..." preview shows the model's own raw (possibly
+  // bare/wrong) browser value instead of what a real call would actually
+  // send. createDryRunDispatcher only inspects args for VERDICT_WRITE_TOOLS
+  // (create_defect/update_run_results); wrapping it inside the label
+  // dispatcher doesn't change behavior for any other tool.
+  const dispatch = createBrowserLabelDispatcher(
+    createDryRunDispatcher(screenshotViewer.wrapDispatch(gatedValidatorAppq), dryRun),
+    browserLabel,
   );
 
   const validatorResult = await runWorkflow({

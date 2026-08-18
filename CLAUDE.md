@@ -91,31 +91,40 @@ correctly threading into the validator's `create_defect` calls), `providers/anth
 `vi.fn().mockImplementation()` — the latter doesn't honor a returned object under `new` in
 this vitest version, cost an hour of debugging before switching; message/image conversion
 for both wire formats, Anthropic's cache-control breakpoints, the real `?? undefined` vs `0`
-distinction on `cache_read_input_tokens`). 277 tests total — every source file with real
+distinction on `cache_read_input_tokens`). 283 tests total — every source file with real
 logic now has one, except `cli/index.ts` itself (Commander wiring calling already-tested
 pieces; testing it meaningfully would mean invoking `.parseAsync()` with fake argv, more
 E2E than unit) and the `.d.ts` type shim (no runtime code).
 
-**Two real bugs surfaced by writing this last slice, not yet fixed — flagging rather than
-silently patching, since both are behavior changes:**
-1. `EvidenceCapture.captureStep()` is defined but never called anywhere in this codebase
-   (grepped: zero call sites outside its own file and the new test). `getSteps()` is
+**Two real bugs surfaced by writing this last slice, now fixed:**
+1. `EvidenceCapture.captureStep()` was defined but never called anywhere in this codebase
+   (grepped: zero call sites outside its own file and its test). `getSteps()` was
    therefore always empty, so `browser_console_messages`/`browser_network_requests`
-   unconditionally return `"[]"` regardless of what actually happened on the page. Since
-   the executor is instructed to call these before `submit_execution_evidence`, this may
-   mean console/network deltas have been submitted empty to appq this whole time —
+   unconditionally returned `"[]"` regardless of what actually happened on the page —
+   since the executor is instructed to call these before `submit_execution_evidence`, this
+   meant console/network deltas had been submitted empty to appq this whole time,
    independent of the model-compliance explanation floated earlier this session for a
-   similar-looking gap. `EvidenceCapture` itself works correctly once `captureStep()` is
-   actually called (covered by `evidence/capture.test.ts`) — this is a wiring gap, not a
-   bug in the capture logic.
-2. In `judgeTc.ts`, `createDryRunDispatcher` wraps `createBrowserLabelDispatcher` from the
+   similar-looking gap. `EvidenceCapture`'s own capture logic was already correct
+   (`captureStep()` behaves fine, per its existing tests) — this was purely a wiring gap.
+   Fixed by adding `EvidenceCapture.getConsoleDeltas()`/`getNetworkDeltas()`, cursor-based
+   direct reads that share the same consumption cursor as `captureStep()` so nothing is
+   double-counted, and pointing `browserTools.ts`'s two dispatch cases at them directly
+   instead of `getSteps()`. Verified live against real DailyPulse data post-fix —
+   `browser_network_requests` returned genuine captured requests with real status codes,
+   not `"[]"`.
+2. In `judgeTc.ts`, `createDryRunDispatcher` wrapped `createBrowserLabelDispatcher` from the
    outside (`createDryRunDispatcher(createBrowserLabelDispatcher(...), dryRun)`). Since
    `createDryRunDispatcher` intercepts `create_defect`/`update_run_results` before ever
-   calling `inner`, the browser-label correction never runs for a dry-run verdict-write —
-   the logged "would call create_defect with..." preview shows the model's own raw
+   calling `inner`, the browser-label correction never ran for a dry-run verdict-write —
+   the logged "would call create_defect with..." preview showed the model's own raw
    (possibly bare/wrong) `browser` value, not what a real, non-dry-run call would actually
-   send. Confirmed empirically in `judgeTc.test.ts`. Fix would be reordering the wrap so
-   `createBrowserLabelDispatcher` is outermost.
+   send. Fixed by reordering the wrap so `createBrowserLabelDispatcher` is outermost (see
+   `judgeTc.ts`'s comment on the dispatch chain for why the order matters). Confirmed via
+   `judgeTc.test.ts` (a dry-run preview now shows the corrected label); not separately
+   confirmed against a live defect-filing run, since the live regression check's dry-run
+   pass happened to reach a passing verdict and never called `create_defect` — the unit
+   test exercises the exact same dispatcher chain deterministically, so this is considered
+   sufficiently verified without forcing a failing scenario just to observe it live.
 
 **`run` merged into `judge`:** originally two separate commands (`judge` for one TC,
 `run` for a whole scenario) — merged into one, since `run` was always just `judge`'s exact

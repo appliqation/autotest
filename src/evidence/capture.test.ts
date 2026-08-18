@@ -107,6 +107,41 @@ describe('EvidenceCapture', () => {
     expect(capture.getSteps()).toEqual([]);
   });
 
+  describe('getConsoleDeltas / getNetworkDeltas — direct read path for browser_console_messages/network_requests', () => {
+    it('getConsoleDeltas returns real entries without needing captureStep to have run', () => {
+      const { page, handlers } = fakePage();
+      const capture = new EvidenceCapture(page);
+      fireConsole(handlers, 'error', 'a real console error');
+      expect(capture.getConsoleDeltas()).toEqual([{ type: 'error', text: 'a real console error', timestamp: expect.any(Number) }]);
+    });
+
+    it('getNetworkDeltas returns real entries without needing captureStep to have run', () => {
+      const { page, handlers } = fakePage();
+      const capture = new EvidenceCapture(page);
+      fireRequestFailed(handlers, 'POST', 'https://example.com/checkout');
+      expect(capture.getNetworkDeltas()).toEqual([{ method: 'POST', url: 'https://example.com/checkout', status: undefined, timestamp: expect.any(Number) }]);
+    });
+
+    it('a second call only returns what arrived since the first call, not the full history', () => {
+      const { page, handlers } = fakePage();
+      const capture = new EvidenceCapture(page);
+      fireConsole(handlers, 'log', 'first');
+      expect(capture.getConsoleDeltas()).toHaveLength(1);
+      expect(capture.getConsoleDeltas()).toEqual([]); // nothing new since the last call
+      fireConsole(handlers, 'log', 'second');
+      expect(capture.getConsoleDeltas()).toEqual([{ type: 'log', text: 'second', timestamp: expect.any(Number) }]);
+    });
+
+    it('shares the same cursor as captureStep — a delta consumed by one is not double-counted by the other', async () => {
+      const { page, handlers } = fakePage();
+      const capture = new EvidenceCapture(page);
+      fireConsole(handlers, 'log', 'seen once');
+      const step = await capture.captureStep(0, 'x');
+      expect(step.consoleDeltas).toHaveLength(1);
+      expect(capture.getConsoleDeltas()).toEqual([]); // already consumed by captureStep
+    });
+  });
+
   it('the console ring buffer drops the oldest entries once the cap is exceeded', async () => {
     const { page, handlers } = fakePage();
     const capture = new EvidenceCapture(page, 3); // small cap for a fast test
