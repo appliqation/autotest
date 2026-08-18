@@ -9,6 +9,7 @@ import { executorAllowedAppqTools, validatorAllowedAppqTools } from '../tools/sa
 import { fetchAppqToolDefs, createGatedAppqDispatcher } from '../tools/appqTools.js';
 import { ScreenshotViewer } from '../tools/screenshotViewer.js';
 import { createDryRunDispatcher } from '../tools/dryRun.js';
+import { formatBrowserLabel, createBrowserLabelDispatcher } from '../tools/browserLabel.js';
 import { runWorkflow } from '../engine/workflowRunner.js';
 import type { LoopResult } from '../engine/loop.js';
 import type { ProviderAdapter, RunBudget, ToolDispatcher } from '../types.js';
@@ -45,6 +46,9 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
 
   // Stage 1: executor. Drives a real browser; may write only evidence.
   const browser = await chromium.launch();
+  // Captured before the browser closes below — Stage 2 never launches its
+  // own browser, so this is the only point with access to the real version.
+  const browserLabel = formatBrowserLabel(browser.version());
   const page = await browser.newPage();
   let executorResult: LoopResult;
   try {
@@ -79,7 +83,10 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
   const screenshotViewer = new ScreenshotViewer(mandatoryImageCheck);
   const validatorToolDefs = await fetchAppqToolDefs(validatorAllowedAppqTools());
   const gatedValidatorAppq = createGatedAppqDispatcher(validatorAllowedAppqTools());
-  const dispatch = createDryRunDispatcher(screenshotViewer.wrapDispatch(gatedValidatorAppq), dryRun);
+  const dispatch = createDryRunDispatcher(
+    createBrowserLabelDispatcher(screenshotViewer.wrapDispatch(gatedValidatorAppq), browserLabel),
+    dryRun,
+  );
 
   const validatorResult = await runWorkflow({
     source: { kind: 'appq', name: 'appq:autotest-validator', args: { run_id: runId, test_case_uuid: testCaseUuid } },
