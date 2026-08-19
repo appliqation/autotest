@@ -13,7 +13,7 @@
 //     the destructive-action gate: a "please look at every screenshot"
 //     instruction depends on model compliance, an eager fetch doesn't.
 
-import type { LlmImage, LlmToolDef, ToolResult } from '../types.js';
+import type { LlmImage, LlmToolDef, ToolResult } from '@appliqation/agent-core';
 
 export const VIEW_SCREENSHOT_TOOL: LlmToolDef = {
   name: 'view_screenshot',

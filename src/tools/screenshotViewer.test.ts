@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ScreenshotViewer, VIEW_SCREENSHOT_TOOL } from './screenshotViewer.js';
-import type { ToolResult } from '../types.js';
+import type { ToolResult } from '@appliqation/agent-core';
 
 function fakeFetchResponse(ok: boolean, status = 200, body = new Uint8Array([1, 2, 3]).buffer) {
   return {

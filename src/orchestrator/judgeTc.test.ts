@@ -3,19 +3,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 const { mockLaunch } = vi.hoisted(() => ({ mockLaunch: vi.fn() }));
 vi.mock('playwright', () => ({ chromium: { launch: mockLaunch } }));
 
-const { mockFetchPrompt, mockCallTool, mockListTools } = vi.hoisted(() => ({
-  mockFetchPrompt: vi.fn(),
-  mockCallTool: vi.fn(),
-  mockListTools: vi.fn(),
-}));
-vi.mock('../appq/mcpClient.js', () => ({
-  fetchPrompt: (...args: unknown[]) => mockFetchPrompt(...args),
-  callTool: (...args: unknown[]) => mockCallTool(...args),
-  listTools: (...args: unknown[]) => mockListTools(...args),
-}));
-
 import { judgeTc } from './judgeTc.js';
-import type { ProviderAdapter, LlmCompleteResult } from '../types.js';
+import type { ProviderAdapter, LlmCompleteResult, McpClient } from '@appliqation/agent-core';
 
 function fakePage() {
   return {
@@ -37,6 +26,16 @@ function fakeBrowserChain() {
   return { browser, context, page };
 }
 
+function fakeClient(): McpClient {
+  return {
+    fetchPrompt: vi.fn().mockResolvedValue('workflow system prompt'),
+    startWorkflow: vi.fn(),
+    callTool: vi.fn().mockResolvedValue({ ok: true, text: '{}' }),
+    listTools: vi.fn().mockResolvedValue([]),
+    uploadScreenshot: vi.fn(),
+  };
+}
+
 /** An adapter whose single completion is queued up front — enough to end runLoop after one turn. */
 function adapterReturning(response: LlmCompleteResult): ProviderAdapter {
   return { complete: vi.fn().mockResolvedValue(response) };
@@ -46,10 +45,10 @@ const textOnly = (text: string): LlmCompleteResult => ({ text, toolCalls: [] });
 const budget = { maxCalls: 50, maxPages: 12, maxMillis: 900_000, maxTurns: 5 };
 
 describe('judgeTc', () => {
+  let client: McpClient;
+
   beforeEach(() => {
-    mockFetchPrompt.mockReset().mockResolvedValue('workflow system prompt');
-    mockListTools.mockReset().mockResolvedValue([]);
-    mockCallTool.mockReset().mockResolvedValue({ ok: true, text: '{}' });
+    client = fakeClient();
   });
 
   it('launches a browser, creates a plain context (no storageState given), and closes it after the executor stage', async () => {
@@ -57,6 +56,7 @@ describe('judgeTc', () => {
     mockLaunch.mockResolvedValue(browser);
 
     await judgeTc({
+      client,
       runId: 'r1',
       testCaseUuid: 'tc1',
       url: 'https://example.com',
@@ -79,6 +79,7 @@ describe('judgeTc', () => {
     const storageState = { cookies: [], origins: [] };
 
     await judgeTc({
+      client,
       runId: 'r1',
       testCaseUuid: 'tc1',
       url: 'https://example.com',
@@ -101,6 +102,7 @@ describe('judgeTc', () => {
 
     await expect(
       judgeTc({
+        client,
         runId: 'r1',
         testCaseUuid: 'tc1',
         url: 'https://example.com',
@@ -121,6 +123,7 @@ describe('judgeTc', () => {
     mockLaunch.mockResolvedValue(browser);
 
     await judgeTc({
+      client,
       runId: 'r1',
       testCaseUuid: 'tc1',
       url: 'https://example.com',
@@ -131,7 +134,7 @@ describe('judgeTc', () => {
       dryRun: false,
     });
 
-    const fetchedNames = mockFetchPrompt.mock.calls.map((c) => c[0]);
+    const fetchedNames = (client.fetchPrompt as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
     expect(fetchedNames).toEqual(['appq:autotest-executor', 'appq:autotest-validator']);
   });
 
@@ -140,6 +143,7 @@ describe('judgeTc', () => {
     mockLaunch.mockResolvedValue(browser);
 
     const result = await judgeTc({
+      client,
       runId: 'r1',
       testCaseUuid: 'tc1',
       url: 'https://example.com',
@@ -157,8 +161,8 @@ describe('judgeTc', () => {
   it("passes the real browser.version()-derived label to create_defect when NOT in dry-run mode", async () => {
     const { browser } = fakeBrowserChain();
     mockLaunch.mockResolvedValue(browser);
-    mockListTools.mockResolvedValue([{ name: 'create_defect', description: 'x', inputSchema: {} }]);
-    mockCallTool.mockResolvedValue({ ok: true, text: 'defect created', raw: {} });
+    (client.listTools as ReturnType<typeof vi.fn>).mockResolvedValue([{ name: 'create_defect', description: 'x', inputSchema: {} }]);
+    (client.callTool as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, text: 'defect created', raw: {} });
 
     // Validator's first turn calls create_defect with a (wrong) bare "Chromium" browser value.
     const validatorAdapter: ProviderAdapter = {
@@ -172,6 +176,7 @@ describe('judgeTc', () => {
     };
 
     await judgeTc({
+      client,
       runId: 'r1',
       testCaseUuid: 'tc1',
       url: 'https://example.com',
@@ -182,7 +187,7 @@ describe('judgeTc', () => {
       dryRun: false,
     });
 
-    expect(mockCallTool).toHaveBeenCalledWith('create_defect', expect.objectContaining({ browser: 'Chromium 133' }));
+    expect(client.callTool).toHaveBeenCalledWith('create_defect', expect.objectContaining({ browser: 'Chromium 133' }));
   });
 
   it(
@@ -192,7 +197,7 @@ describe('judgeTc', () => {
     async () => {
       const { browser } = fakeBrowserChain();
       mockLaunch.mockResolvedValue(browser);
-      mockListTools.mockResolvedValue([{ name: 'create_defect', description: 'x', inputSchema: {} }]);
+      (client.listTools as ReturnType<typeof vi.fn>).mockResolvedValue([{ name: 'create_defect', description: 'x', inputSchema: {} }]);
       const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
       const validatorAdapter: ProviderAdapter = {
@@ -206,6 +211,7 @@ describe('judgeTc', () => {
       };
 
       await judgeTc({
+        client,
         runId: 'r1',
         testCaseUuid: 'tc1',
         url: 'https://example.com',
@@ -217,7 +223,7 @@ describe('judgeTc', () => {
       });
 
       // The real appq call never happens in dry-run mode at all.
-      expect(mockCallTool).not.toHaveBeenCalledWith('create_defect', expect.anything());
+      expect(client.callTool).not.toHaveBeenCalledWith('create_defect', expect.anything());
       // But the logged preview now reflects the corrected browser label.
       const loggedPreview = errSpy.mock.calls.map((c) => c[0]).find((l) => typeof l === 'string' && l.includes('create_defect'));
       expect(loggedPreview).toContain('"browser": "Chromium 133"');

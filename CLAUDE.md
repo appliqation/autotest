@@ -24,7 +24,7 @@ called for local specs/stubs standing in for appq's tools; instead, the real
 were built directly on appq's `appq/autotest-mcp-tools` branch (isolated from the other
 feature in flight there), so there was never a stub to build or later swap out.
 
-**Current phase: Phase 5 verified live, Phase 6 (CI polish) done.**
+**Current phase: Phase 5 verified live, Phase 6 (CI polish) done, test-set mode (`judge --test-set-id`) added and verified live.**
 The appq side is done and verified: `appq:autotest-executor`/`-validator`/`autotest`,
 `get_automation_readiness`, `submit_execution_evidence`/`get_execution_evidence`, and the
 `blocked` status enum are all deployed to the real origin and confirmed working by direct
@@ -133,6 +133,29 @@ genuinely different mechanism. `judge --test-case-uuid <uuid>` is single-TC mode
 (unconditional executor/validator pair); `judge --scenario-id <id>` with no
 `--test-case-uuid` is whole-scenario mode (coverage policy decides per TC).
 
+**Test-set mode (`judge --test-set-id <id>`):** the most common CI shape — a regression/
+sanity/smoke suite is a test set, not a single scenario. appq's own `get_test_set`
+describes a test set as spanning multiple scenarios, but `create_run`/
+`update_run_results` is inherently scenario-scoped, so this mode groups the test set's
+TCs by their own UUID-derived `scenario_id` (`scenarioIdFromTcUuid()`, the same source of
+truth used everywhere else in this codebase — never a second parsed field that could
+disagree with it) and resolves one run + one `get_automation_readiness` check per
+distinct scenario represented, not one overall. Coverage policy, role inference, and
+poll-then-report all apply per TC exactly as in whole-scenario mode; the final report is
+one consolidated summary across every scenario, with each `TcOutcome` carrying its own
+`runId`/`scenarioId` since there's no single one to report at the top level (see
+`RunSummary`/`TcOutcome` in `src/cli/output.ts`). `--run-id` reuse is deliberately not
+supported in this mode — there's no single run to reuse across possibly-many scenarios.
+`fetchTestSetInfo()` (in `@appliqation/agent-core`'s `scenarioResolvers.ts`) is the
+`get_test_set` counterpart to `fetchScenarioInfo()` — note its MCP param is
+`testset_id`, not `test_set_id` (a real trap hit during implementation: the tool's actual
+`inputSchema`, confirmed via `tools/list`, differs from the CLI flag's own naming).
+Verified live (`--dry-run --json`) against the real "DailyPulse — Smoke" test set
+(test_set_id 1358, 8 TCs spanning 8 distinct scenarios): correctly created 8 separate
+per-scenario runs, applied `on-script-absence` coverage (1 TC with no canonical script
+got real agentic judging, the other 7 were left deterministic-only), and produced one
+consolidated JSON summary with each TC's own `runId`/`scenarioId` populated correctly.
+
 `--project-id` and `--url` are **not CLI options at all** — always derived, never
 accepted as separate caller-supplied inputs (`fetchScenarioInfo`/`resolveUrl` in
 `src/cli/resolvers.ts`): project_id via `get_scenario` (a scenario belongs to exactly one
@@ -197,13 +220,42 @@ TC's name doesn't match any" (falls through to unauthenticated, doesn't crash).
 **Config philosophy:** avoid hardcoded values wherever a real choice exists — see
 `src/config/env.ts` and `.env.example` for the full surface (models per provider per
 role, max tokens, all budget caps, ring buffer size, poll interval/timeout). The one
-deliberate exception is `src/tools/safety.ts`: the destructive-action gate and the
-per-stage tool allowlists stay hardcoded on purpose — that's "the one hardcoded,
-non-negotiable invariant" the whole executor/validator safety model rests on, not an
-oversight to fix. Don't add a config knob for those.
+deliberate exception is the destructive-action gate and the per-stage tool allowlists
+(`src/tools/safety.ts` + the shared enforcement mechanism, see below) — that's "the one
+hardcoded, non-negotiable invariant" the whole executor/validator safety model rests on,
+not an oversight to fix. Don't add a config knob for those.
+
+**Migrated onto `@appliqation/agent-core` (shared package).** This repo's generic engine
+(think→act→observe loop, budget tracking, the appq MCP JSON-RPC client, the gated-tool-
+dispatch mechanism, Playwright browser tools, evidence capture, auth/role inference,
+scenario resolvers, LLM provider adapters) was always meant to be reused by future sibling
+agents (per the plan's "larger vision" section) — that became real once
+`appliqation-scriptgen` (a script-generation agent) needed the same pieces, so it was
+extracted into a new sibling repo/npm package, `~/Sites/localhost/appliqation-agent-core/`
+(`@appliqation/agent-core`), and this repo was migrated onto it in the same change. Not yet
+published — consumed via a local `file:../appliqation-agent-core` dependency in
+`package.json` until it's actually published to npm; switch that to a real version pin once
+it is. Two real refactors happened as part of the move, not just a file relocation:
+`mcpClient.ts` became a `createMcpClient({origin, apiKey})` factory instead of a module-level
+singleton reading a global `config` (each consuming agent has its own `.env` shape), and
+`browserTools.ts`'s `PlaywrightBrowserTools` gained two injectable hooks
+(`onBeforeClick`/`screenshotSink`) instead of hardcoding `classifyClick`/`uploadScreenshot`
+directly, so a sibling agent with no appq write access (or a different destructive-action
+policy) can supply its own. Everything that moved is re-exported from `@appliqation/agent-core`
+(root barrel) and its subpaths (`/engine`, `/appq`, `/providers`, `/tools`, `/evidence`,
+`/config`) — see that package's own source for exact contents. What stayed local, deliberately:
+the **allowlist content** (`src/tools/safety.ts` — which tools each stage may touch is this
+app's own domain knowledge; only the generic *enforcement mechanism*, `assertToolAllowed()`,
+moved), and everything else that's genuinely autotest-specific (dry-run, browser-label
+correction, screenshot-viewer, coverage policy, poll-results, `judgeTc.ts`'s orchestration,
+CLI/output). Verified: full test suite green post-migration (84 tests, split across what
+moved — now covered by `agent-core`'s own 205-test suite — and what stayed), `npx tsc --noEmit`
+clean, and a live `judge --dry-run` regression run against real DailyPulse/appq data producing
+the identical executor→evidence→validator→verdict flow as before the migration.
 
 ## Where to find what
 
+**Local to this repo:**
 - `src/cli/` — CLI entrypoints. `runman` (Phase 1) proves the engine against the
   existing, real `appq:runman` workflow. `judge` (Phase 2 + 5, merged) runs one test case
   or a whole scenario, branching on whether `--test-case-uuid` is given. Single-TC mode:
@@ -214,41 +266,25 @@ oversight to fix. Don't add a config knob for those.
   `src/orchestrator/`) for the TCs that need agentic coverage, then polls
   `get_test_results` once for the full TC list — that single poll picks up both the
   deterministic pipeline's own results and whatever the validator already wrote itself, so
-  no special-casing is needed between the two paths.
-- `src/cli/resolvers.ts` — `resolveScenarioId`/`fetchScenarioInfo`/`resolveUrl`/`resolveRun`,
-  extracted out of `index.ts` so they're testable in isolation (importing `index.ts` itself
-  would trigger its top-level `program.parseAsync(process.argv)`). project_id/url are always
-  derived, never accepted as CLI options — see "Current phase" above for why; scenario_id is
-  derived from the TC UUID in single-TC mode.
+  no special-casing is needed between the two paths. Constructs one `McpClient` (via
+  `createMcpClient()` from `@appliqation/agent-core`) near the top of the file and threads
+  it down everywhere — the same "construct once, pass down" pattern already used for the
+  executor/validator adapters.
 - `src/orchestrator/` — `judgeTc.ts` (the executor→validator pair for one TC, factored out
-  so `judge`'s two modes share exactly one implementation), `coveragePolicy.ts` (`always` /
+  so `judge`'s two modes share exactly one implementation; takes an `McpClient` as an
+  explicit param now, not a module-level import), `coveragePolicy.ts` (`always` /
   `on-script-absence` / `sampled:N` / `external` — never hardcoded, see the plan's
   "coverage decision"; `external` throws if selected without a decider function wired up —
   a deliberate hook for a future orchestrating agent, not a silent fallback),
   `pollResults.ts` (poll-until-settled against `get_test_results`, since the deterministic
-  path is SQS-driven with no blocking/webhook API).
-- `src/engine/` — the generic, workflow-agnostic core: `loop.ts` (think→act→observe),
-  `budget.ts` (call/page/time caps), `workflowRunner.ts` (fetches a named appq workflow
-  and runs it through the loop as one fresh-context invocation — the same function backs
-  both `runman` and each stage of `judge`; two calls to it with no shared `messages`
-  array is the entire mechanism behind executor/validator isolation, nothing fancier).
-  This is the one piece meant to be reusable by future sibling agents (runman-as-CLI,
-  defect-fix, PR-raise) per the plan's "larger vision" section — keep it workflow-name-
-  agnostic, resist adding autotest-specific assumptions here.
-- `src/tools/` — `browserTools.ts` (Playwright-backed `browser_*` tool palette, ref-based
-  via `page.ariaSnapshot({mode:'ai'})` + `aria-ref=` locators — no manual DOM injection),
-  `appqTools.ts` (`fetchAppqToolDefs()` filters `tools/list` to an allowlist for what's
-  *offered* to the model; `createGatedAppqDispatcher()` is the actual enforcement point —
-  it calls `assertToolAllowed()` before every dispatch, so a call outside the allowlist
-  can't execute even if a model attempts it or a served prompt suggests it), `safety.ts`
-  (**the one hardcoded, non-negotiable invariant** — the destructive-action gate and the
-  per-stage read/write allowlists; no served workflow prompt can widen these).
-- `src/appq/mcpClient.ts` — JSON-RPC client to `/api/appq/mcp`: `fetchPrompt()`
-  (`prompts/get` — pass the **full** name, e.g. `appq:runman`, not the short
-  `start_workflow` name), `startWorkflow()`, `callTool()`, `listTools()`,
-  `uploadScreenshot()`.
-- `src/evidence/capture.ts` — screenshot/console/network/accessibility-snapshot capture
-  via native Playwright/CDP APIs.
+  path is SQS-driven with no blocking/webhook API — also takes an `McpClient` param now).
+- `src/tools/safety.ts` — **the one hardcoded, non-negotiable invariant that's local to
+  this app**: which appq tools the executor/validator stages may each touch
+  (`READONLY_APPQ_TOOLS`, `EXECUTOR_WRITE_TOOL`, `VALIDATOR_ONLY_APPQ_TOOLS`,
+  `executorAllowedAppqTools()`/`validatorAllowedAppqTools()`). The enforcement mechanism
+  itself (`assertToolAllowed()`, the gated-dispatcher factory) lives in
+  `@appliqation/agent-core` now, shared with every sibling agent — only the allowlist
+  *content* stays here, since it's specific to this app's executor/validator split.
 - `src/tools/screenshotViewer.ts` — turns `get_execution_evidence`'s `screenshot_url` (a
   string in text, never actually seen by the model on its own) into a real vision input.
   Two modes, chosen by `--mandatory-image-check`/`MANDATORY_IMAGE_CHECK`, deliberately an
@@ -257,51 +293,94 @@ oversight to fix. Don't add a config knob for those.
   evidence isn't enough — most steps don't need it) or mandatory (every step's screenshot
   fetched and attached unconditionally, enforced in code before the model ever gets a
   turn — same reasoning as the destructive-action gate: don't rely on the model asking).
-- `src/providers/` — official `@anthropic-ai/sdk`/`openai` adapters, model and max-tokens
-  passed in (`config/env.ts`'s `resolveModel(role)` — separate overrides per provider AND
-  per role, since judging captured evidence is closer to bounded classification than the
-  executor's open-ended browser-driving planning; a cheaper/different model is a
-  reasonable fit for the validator specifically, and a decorrelation lever against
-  same-model self-grading risk). The Anthropic adapter also sets `cache_control`
-  breakpoints (system prompt, tool defs, growing message history) — see the plan/session
-  notes on why: the workflow prompt and tool list are static and reused across every turn
-  and every TC, and the full history gets resent every turn regardless, so caching is
-  high-leverage here, not optional polish. Both adapters also handle `LlmMessage.images`
-  on tool results — Anthropic inline in the `tool_result` block, OpenAI as a synthetic
-  follow-up `input_image` message (the Responses API has no way to attach an image to a
-  function output directly).
 - `src/tools/dryRun.ts` — `--dry-run`'s enforcement point: intercepts
   `update_run_results`/`create_defect` calls and logs what would have been sent instead of
   sending it. A dispatch-level intercept, not a prompt instruction, same reasoning as the
   destructive-action gate — the validator's own workflow prose is what decides to write,
   so "don't write" has to be enforced below that, not asked of it.
+- `src/tools/browserLabel.ts` — corrects create_defect's LLM-guessed bare `"Chromium"`
+  browser value to the real `browser.version()`-derived label, in code rather than trusting
+  the model to know something it has no runtime access to.
 - `src/cli/output.ts` — `--json`/`--ci`'s renderer: a single structured `RunSummary` (one
   TC in single-TC mode, all of them in whole-scenario mode) either printed as JSON or as
   the human table, plus `exitCodeFor()` — non-zero whenever a non-dry-run result is
   `failed`/`blocked`/`pending` (poll-timeout), so a CI job can gate on the process exit
   code without scraping prose. Progress logs (`onEvent` → `console.error`) are untouched
   by this; it only changes the final-outcome rendering on stdout.
-- `src/tools/authState.ts` — `judge --role <name>`'s implementation: reads the Playwright
-  storageState `@appliqation/automation-sdk`'s `setupAuth({project_id, role})` resolves
-  (`~/.appq-auth/` by default), fail-closed with an actionable error (pointing at
-  `npx appq-auth-setup`) if it doesn't exist yet. Deliberately does not perform login or
-  handle credentials itself — Appliqation already has a complete, human-reviewed mechanism
-  for that (`appq:setup-auth` produces a customer-committed `login.ts`; `appq-auth-setup`,
-  also shipped by the SDK, runs it and writes the session file) and this client is just one
-  more reader of the same file every other runtime already agrees on. Resolved once per
-  CLI invocation (`cli/index.ts`) and threaded into `judgeTc.ts`'s executor browser context
-  only (`browser.newContext({storageState})`) — the validator never launches a browser, so
-  it's not relevant there. Credentials never reach this client or the LLM's own context;
-  only the resulting session (cookies/localStorage) does, read directly from disk in code.
-  `@appliqation/automation-sdk/utils` ships with no TypeScript declarations (confirmed by
-  reading the installed package — only `./login` has a `.d.ts`) — `src/types/automation-sdk.d.ts`
-  is a minimal ambient shim for just the functions actually used here, kept in sync with
-  the real source rather than guessed.
-- `src/tools/roleInference.ts` — per-TC role auto-detection for mixed-role scenarios, used
-  when `--role` is omitted: `knownRolesForProject()` (env var scan), `inferRole()` (tag/name
-  precedence), `parseScenarioTcList()` (parses `get_scenario`'s TC list text — same
-  text-coupling trade-off `fetchScenarioInfo()` in `cli/resolvers.ts` already accepts for
-  `Project ID: N`). See "Current phase" above for the full reasoning.
+- `src/config/env.ts` — this app's own frozen `config` object + `resolveProvider()`/
+  `resolveModel(role)`, built from `@appliqation/agent-core/config`'s shared `required()`/
+  `optional()` primitives (a shared config *schema*/singleton was deliberately not built —
+  each agent's `.env` shape is genuinely different).
+
+**In `@appliqation/agent-core`** (`~/Sites/localhost/appliqation-agent-core/`, imported as
+`@appliqation/agent-core` and its subpaths) — the generic, workflow-agnostic core meant to
+be reused by every sibling agent, not just this one:
+- `/engine` — `loop.ts` (think→act→observe), `budget.ts` (call/page/time caps),
+  `workflowRunner.ts` (fetches a named appq workflow and runs it through the loop as one
+  fresh-context invocation — the same function backs both `runman` and each stage of
+  `judge`; two calls to it with no shared `messages` array is the entire mechanism behind
+  executor/validator isolation, nothing fancier). Takes an explicit `fetchPrompt` function
+  now rather than importing one, so it has zero appq-specific coupling.
+- `/appq` — `mcpClient.ts` (`createMcpClient({origin, apiKey})` factory: `fetchPrompt()`
+  (`prompts/get` — pass the **full** name, e.g. `appq:runman`, not the short
+  `start_workflow` name), `startWorkflow()`, `callTool()`, `listTools()`,
+  `uploadScreenshot()`), `scenarioResolvers.ts` (`resolveScenarioId`/`fetchScenarioInfo`/
+  `resolveUrl`/`resolveRun`, each taking an `McpClient` param — project_id/url are always
+  derived, never accepted as separate inputs, see "Current phase" above for why;
+  scenario_id is derived from the TC UUID in single-TC mode).
+- `/providers` — official `@anthropic-ai/sdk`/`openai` adapters, model and max-tokens
+  passed in (this app's own `config/env.ts`'s `resolveModel(role)` supplies them —
+  separate overrides per provider AND per role, since judging captured evidence is closer
+  to bounded classification than the executor's open-ended browser-driving planning; a
+  cheaper/different model is a reasonable fit for the validator specifically, and a
+  decorrelation lever against same-model self-grading risk). The Anthropic adapter also
+  sets `cache_control` breakpoints (system prompt, tool defs, growing message history) —
+  the workflow prompt and tool list are static and reused across every turn and every TC,
+  and the full history gets resent every turn regardless, so caching is high-leverage
+  here, not optional polish. Both adapters also handle `LlmMessage.images` on tool
+  results — Anthropic inline in the `tool_result` block, OpenAI as a synthetic follow-up
+  `input_image` message (the Responses API has no way to attach an image to a function
+  output directly).
+- `/tools` — `browserTools.ts` (Playwright-backed `browser_*` tool palette, ref-based via
+  `page.ariaSnapshot({mode:'ai'})` + `aria-ref=` locators — no manual DOM injection;
+  `PlaywrightBrowserTools`'s constructor takes optional `{onBeforeClick, screenshotSink}`
+  hooks now, defaulting to the shared `classifyClick`/no-op respectively), `gatedDispatcher.ts`
+  (`fetchAppqToolDefs()` filters `tools/list` to an allowlist for what's *offered* to the
+  model; `createGatedAppqDispatcher()` is the actual enforcement point — it calls
+  `assertToolAllowed()` before every dispatch, so a call outside the allowlist can't
+  execute even if a model attempts it or a served prompt suggests it — the mechanism is
+  shared, the allowlist content stays local to each agent, see `src/tools/safety.ts`
+  above), `destructiveActionGate.ts` (`classifyClick` — the destructive-verb/mailto/tel/sms
+  regex bank, checked before any click dispatches; genuinely universal, no appq coupling),
+  `authState.ts` (`resolveStorageState()` — `judge --role <name>`'s implementation: reads
+  the Playwright storageState `@appliqation/automation-sdk`'s `setupAuth({project_id,
+  role})` resolves (`~/.appq-auth/` by default), fail-closed with an actionable error
+  pointing at `npx appq-auth-setup` if it doesn't exist yet. Deliberately does not perform
+  login or handle credentials itself — Appliqation already has a complete, human-reviewed
+  mechanism for that, this is just one more reader of the same file every other runtime
+  already agrees on. Resolved once per CLI invocation and threaded into `judgeTc.ts`'s
+  executor browser context only — the validator never launches a browser. Credentials
+  never reach this client or the LLM's own context; only the resulting session
+  (cookies/localStorage) does, read directly from disk in code. `@appliqation/automation-sdk/utils`
+  ships with no TypeScript declarations — `src/types/automation-sdk.d.ts` inside
+  `agent-core` is a minimal ambient shim for just the functions actually used, kept in
+  sync with the real source rather than guessed), `roleInference.ts` (per-TC role
+  auto-detection for mixed-role scenarios, used when `--role` is omitted:
+  `knownRolesForProject()` (env var scan for `APPQ_PROJECT_<id>_<ROLE>_USERNAME` — no new
+  appq lookup needed, role names are UI-validated lowercase/no-spaces so the env var's role
+  segment round-trips back exactly), `inferRole()` (tag/name precedence — explicit
+  `role:<name>` tag > `role:anonymous`/"anonymous" in the name as an explicit
+  unauthenticated signal > a known role's name appearing in the title > no match, run
+  unauthenticated, not an error — mirrors the precedence already proven in production by
+  `workers/automan-worker/src/services/AIScriptGenerator.js`'s `parseRoleFromTestcaseName()`,
+  but deliberately never falls back to an LLM call, since role selection is a
+  safety-adjacent decision kept deterministic like every other one in this codebase),
+  `parseScenarioTcList()` (parses `get_scenario`'s TC list text — same text-coupling
+  trade-off `fetchScenarioInfo()` already accepts for `Project ID: N`)).
+- `/evidence` — `capture.ts` (`EvidenceCapture` — screenshot/console/network/accessibility-
+  snapshot capture via native Playwright/CDP APIs, cursor-based delta reads).
+- `/config` — `helpers.ts` (`required()`/`optional()` — the only two primitives shared;
+  each agent still builds its own frozen `config` object from its own `.env` shape).
 
 ## Commands
 
@@ -317,11 +396,16 @@ oversight to fix. Don't add a config knob for those.
 - `npx tsx src/cli/index.ts judge --scenario-id <id> --environment <name> [--coverage <policy>] [--dry-run] [--json|--ci]`
   — a whole scenario (no `--test-case-uuid`), consolidated report across every TC.
   `--project-id`/`--url` are still not options — always derived from `--scenario-id`.
+- `npx tsx src/cli/index.ts judge --test-set-id <id> --environment <name> [--coverage <policy>] [--dry-run] [--json|--ci]`
+  — every TC in a test set (regression/sanity/smoke — the common CI case), which can span
+  multiple scenarios; one run per distinct scenario represented, consolidated report
+  across all of them. `--run-id` is not supported in this mode.
 - Add `--role <name>` to either form to force one role for every TC — see
-  `src/tools/authState.ts` above. Omit it and per-TC role auto-detection kicks in instead
-  (see `src/tools/roleInference.ts`) — each TC's own tag/name decides its role, or it runs
-  unauthenticated if none matches. Omit it entirely *and* have no `APPQ_PROJECT_<id>_*`
-  env vars set and nothing changes at all for ungated projects.
+  `@appliqation/agent-core`'s `tools/authState.ts` above. Omit it and per-TC role
+  auto-detection kicks in instead (see its `tools/roleInference.ts`) — each TC's own
+  tag/name decides its role, or it runs unauthenticated if none matches. Omit it entirely
+  *and* have no `APPQ_PROJECT_<id>_*` env vars set and nothing changes at all for ungated
+  projects.
 - `.github/workflows/autotest.yml` — example CI wiring for `judge --dry-run --ci`; needs a
   dedicated appq service-account key (see the workflow's comments) that doesn't exist yet
 

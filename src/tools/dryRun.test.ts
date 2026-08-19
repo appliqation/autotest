@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createDryRunDispatcher } from './dryRun.js';
-import type { ToolResult } from '../types.js';
+import type { ToolResult } from '@appliqation/agent-core';
 
 describe('createDryRunDispatcher', () => {
   it('returns the inner dispatcher unchanged when dryRun is false', () => {

@@ -1,15 +1,23 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-
-const mockCallTool = vi.fn();
-vi.mock('../appq/mcpClient.js', () => ({
-  callTool: (...args: unknown[]) => mockCallTool(...args),
-}));
-
 import { pollTestResults } from './pollResults.js';
+import type { McpClient } from '@appliqation/agent-core';
+
+function fakeClient(): McpClient {
+  return {
+    fetchPrompt: vi.fn(),
+    startWorkflow: vi.fn(),
+    callTool: vi.fn(),
+    listTools: vi.fn(),
+    uploadScreenshot: vi.fn(),
+  };
+}
 
 describe('pollTestResults', () => {
+  let client: McpClient;
+
   beforeEach(() => {
     vi.useFakeTimers();
+    client = fakeClient();
   });
 
   afterEach(() => {
@@ -17,25 +25,25 @@ describe('pollTestResults', () => {
   });
 
   it('returns immediately once all wanted UUIDs are found on the first poll', async () => {
-    mockCallTool.mockResolvedValue({
+    (client.callTool as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,
       text: JSON.stringify({ results: [{ uuid: 'tc-1', status: 'passed' }, { uuid: 'tc-2', status: 'failed' }] }),
     });
 
-    const result = await pollTestResults({
+    const result = await pollTestResults(client, {
       runId: 'r1',
       wantUuids: new Set(['tc-1', 'tc-2']),
       timeoutMs: 60_000,
       intervalMs: 5000,
     });
 
-    expect(mockCallTool).toHaveBeenCalledTimes(1);
+    expect(client.callTool).toHaveBeenCalledTimes(1);
     expect(result.get('tc-1')).toEqual({ uuid: 'tc-1', status: 'passed', errorMessage: undefined });
     expect(result.get('tc-2')?.status).toBe('failed');
   });
 
   it('keeps polling at the given interval until all wanted UUIDs settle', async () => {
-    mockCallTool
+    (client.callTool as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ results: [{ uuid: 'tc-1', status: 'passed' }] }) })
       .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ results: [{ uuid: 'tc-1', status: 'passed' }] }) })
       .mockResolvedValueOnce({
@@ -43,7 +51,7 @@ describe('pollTestResults', () => {
         text: JSON.stringify({ results: [{ uuid: 'tc-1', status: 'passed' }, { uuid: 'tc-2', status: 'blocked' }] }),
       });
 
-    const resultPromise = pollTestResults({
+    const resultPromise = pollTestResults(client, {
       runId: 'r1',
       wantUuids: new Set(['tc-1', 'tc-2']),
       timeoutMs: 60_000,
@@ -55,14 +63,14 @@ describe('pollTestResults', () => {
     await vi.advanceTimersByTimeAsync(5000);
     const result = await resultPromise;
 
-    expect(mockCallTool).toHaveBeenCalledTimes(3);
+    expect(client.callTool).toHaveBeenCalledTimes(3);
     expect(result.get('tc-2')?.status).toBe('blocked');
   });
 
   it('returns whatever settled before the timeout, not everything asked for', async () => {
-    mockCallTool.mockResolvedValue({ ok: true, text: JSON.stringify({ results: [{ uuid: 'tc-1', status: 'passed' }] }) });
+    (client.callTool as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, text: JSON.stringify({ results: [{ uuid: 'tc-1', status: 'passed' }] }) });
 
-    const resultPromise = pollTestResults({
+    const resultPromise = pollTestResults(client, {
       runId: 'r1',
       wantUuids: new Set(['tc-1', 'tc-2']), // tc-2 never shows up
       timeoutMs: 12_000,
@@ -78,11 +86,11 @@ describe('pollTestResults', () => {
   });
 
   it('treats a non-JSON response as "not settled yet" rather than throwing, and keeps polling', async () => {
-    mockCallTool
+    (client.callTool as ReturnType<typeof vi.fn>)
       .mockResolvedValueOnce({ ok: true, text: 'not json' })
       .mockResolvedValueOnce({ ok: true, text: JSON.stringify({ results: [{ uuid: 'tc-1', status: 'passed' }] }) });
 
-    const resultPromise = pollTestResults({
+    const resultPromise = pollTestResults(client, {
       runId: 'r1',
       wantUuids: new Set(['tc-1']),
       timeoutMs: 60_000,
@@ -96,33 +104,33 @@ describe('pollTestResults', () => {
   });
 
   it('ignores results for UUIDs that were not asked for', async () => {
-    mockCallTool.mockResolvedValue({
+    (client.callTool as ReturnType<typeof vi.fn>).mockResolvedValue({
       ok: true,
       text: JSON.stringify({ results: [{ uuid: 'tc-1', status: 'passed' }, { uuid: 'tc-unrelated', status: 'passed' }] }),
     });
 
     // tc-1 alone satisfies wantUuids, so this returns on the first poll — no
     // need to advance fake time.
-    const result = await pollTestResults({ runId: 'r1', wantUuids: new Set(['tc-1']), timeoutMs: 60_000 });
+    const result = await pollTestResults(client, { runId: 'r1', wantUuids: new Set(['tc-1']), timeoutMs: 60_000 });
     expect(result.has('tc-unrelated')).toBe(false);
     expect(result.size).toBe(1);
   });
 
   it('only includes scenario_id in the call when provided', async () => {
-    mockCallTool.mockResolvedValue({ ok: true, text: JSON.stringify({ results: [{ uuid: 'tc-1', status: 'passed' }] }) });
+    (client.callTool as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, text: JSON.stringify({ results: [{ uuid: 'tc-1', status: 'passed' }] }) });
 
-    await pollTestResults({ runId: 'r1', wantUuids: new Set(['tc-1']), timeoutMs: 60_000 });
-    expect(mockCallTool).toHaveBeenCalledWith('get_test_results', { run_id: 'r1' });
+    await pollTestResults(client, { runId: 'r1', wantUuids: new Set(['tc-1']), timeoutMs: 60_000 });
+    expect(client.callTool).toHaveBeenCalledWith('get_test_results', { run_id: 'r1' });
 
-    mockCallTool.mockClear();
-    await pollTestResults({ runId: 'r1', scenarioId: 42, wantUuids: new Set(['tc-1']), timeoutMs: 60_000 });
-    expect(mockCallTool).toHaveBeenCalledWith('get_test_results', { run_id: 'r1', scenario_id: 42 });
+    (client.callTool as ReturnType<typeof vi.fn>).mockClear();
+    await pollTestResults(client, { runId: 'r1', scenarioId: 42, wantUuids: new Set(['tc-1']), timeoutMs: 60_000 });
+    expect(client.callTool).toHaveBeenCalledWith('get_test_results', { run_id: 'r1', scenario_id: 42 });
   });
 
   it('does not settle a UUID whose status is null/missing, and reports it as unsettled after timeout', async () => {
-    mockCallTool.mockResolvedValue({ ok: true, text: JSON.stringify({ results: [{ uuid: 'tc-1', status: null }] }) });
+    (client.callTool as ReturnType<typeof vi.fn>).mockResolvedValue({ ok: true, text: JSON.stringify({ results: [{ uuid: 'tc-1', status: null }] }) });
 
-    const resultPromise = pollTestResults({ runId: 'r1', wantUuids: new Set(['tc-1']), timeoutMs: 12_000, intervalMs: 5000 });
+    const resultPromise = pollTestResults(client, { runId: 'r1', wantUuids: new Set(['tc-1']), timeoutMs: 12_000, intervalMs: 5000 });
     await vi.advanceTimersByTimeAsync(20_000);
     const result = await resultPromise;
 

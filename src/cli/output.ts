@@ -9,11 +9,23 @@ export interface TcOutcome {
   path: 'agentic' | 'canonical script' | 'canonical script + agentic';
   status: string; // e.g. 'passed' | 'failed' | 'blocked' | 'skipped' | 'dry-run' | 'pending'
   errorMessage?: string;
+  /**
+   * Present only in test-set mode, where different TCs can belong to
+   * different scenarios (and therefore different runs — appq's run/
+   * create_run concept is scenario-scoped, a test set is not). Single-TC
+   * and whole-scenario mode share one run for every result, carried at the
+   * top level instead — these stay undefined there.
+   */
+  runId?: string;
+  scenarioId?: number;
 }
 
 export interface RunSummary {
-  runId: string;
+  /** Single-TC / whole-scenario mode only — one run for every result. Omitted in test-set mode; see each TcOutcome's own runId/scenarioId instead. */
+  runId?: string;
   scenarioId?: number;
+  /** Test-set mode only — a test set can span multiple scenarios/runs. */
+  testSetId?: number;
   dryRun: boolean;
   results: TcOutcome[];
 }
@@ -29,7 +41,11 @@ export function printJsonSummary(summary: RunSummary): void {
 }
 
 export function printHumanSummary(summary: RunSummary): void {
-  const header = summary.scenarioId ? `Run ${summary.runId} — scenario ${summary.scenarioId}` : `Run ${summary.runId}`;
+  const header = summary.testSetId
+    ? `Test set ${summary.testSetId}`
+    : summary.scenarioId
+      ? `Run ${summary.runId} — scenario ${summary.scenarioId}`
+      : `Run ${summary.runId}`;
   console.log(`\n=== ${header} ===\n`);
   for (const r of summary.results) {
     console.log(`  ${r.testCaseUuid}  [${r.path}]  ${r.status}`);

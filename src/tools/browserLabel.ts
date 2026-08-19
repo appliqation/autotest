@@ -4,7 +4,7 @@
 // knows and shouldn't leave to a guess. Same reasoning as the dry-run/
 // destructive-action gates: enforce facts in code, not prompts.
 
-import type { ToolDispatcher } from '../types.js';
+import type { ToolDispatcher } from '@appliqation/agent-core';
 
 /** "133.0.6943.16" (Playwright's Browser.version()) -> "Chromium 133". */
 export function formatBrowserLabel(versionString: string): string {

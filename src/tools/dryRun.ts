@@ -7,7 +7,7 @@
 // destructive-action gate and mandatory image check: code-level, not
 // model-compliance-dependent.
 
-import type { ToolResult } from '../types.js';
+import type { ToolResult } from '@appliqation/agent-core';
 
 const VERDICT_WRITE_TOOLS = new Set(['update_run_results', 'create_defect']);
 

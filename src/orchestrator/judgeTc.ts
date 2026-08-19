@@ -5,24 +5,32 @@
 
 import { chromium } from 'playwright';
 import type { BrowserContextOptions } from 'playwright';
-import { PlaywrightBrowserTools, BROWSER_TOOL_DEFS } from '../tools/browserTools.js';
+import {
+  PlaywrightBrowserTools,
+  BROWSER_TOOL_DEFS,
+  fetchAppqToolDefs,
+  createGatedAppqDispatcher,
+  runWorkflow,
+  type LoopResult,
+  type McpClient,
+  type ProviderAdapter,
+  type RunBudget,
+  type ToolDispatcher,
+} from '@appliqation/agent-core';
 import { executorAllowedAppqTools, validatorAllowedAppqTools } from '../tools/safety.js';
-import { fetchAppqToolDefs, createGatedAppqDispatcher } from '../tools/appqTools.js';
 import { ScreenshotViewer } from '../tools/screenshotViewer.js';
 import { createDryRunDispatcher } from '../tools/dryRun.js';
 import { formatBrowserLabel, createBrowserLabelDispatcher } from '../tools/browserLabel.js';
-import { runWorkflow } from '../engine/workflowRunner.js';
-import type { LoopResult } from '../engine/loop.js';
-import type { ProviderAdapter, RunBudget, ToolDispatcher } from '../types.js';
 
 export interface JudgeTcOptions {
+  client: McpClient;
   runId: string;
   testCaseUuid: string;
   url: string;
   /**
    * Playwright storageState (cookies/localStorage) for an authenticated
-   * session, resolved once by the caller via resolveStorageState() and
-   * reused across every TC in a run — see src/tools/authState.ts. Only the
+   * session, resolved once by the caller via resolveStorageState() (from
+   * @appliqation/agent-core) and reused across every TC in a run. Only the
    * executor's browser context uses this; the validator never launches one.
    */
   storageState?: BrowserContextOptions['storageState'];
@@ -50,7 +58,7 @@ export interface JudgeTcResult {
 }
 
 export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
-  const { runId, testCaseUuid, url, storageState, executorAdapter, validatorAdapter, budget, mandatoryImageCheck, dryRun, ringBufferCap, onEvent } = opts;
+  const { client, runId, testCaseUuid, url, storageState, executorAdapter, validatorAdapter, budget, mandatoryImageCheck, dryRun, ringBufferCap, onEvent } = opts;
 
   // Stage 1: executor. Drives a real browser; may write only evidence.
   const browser = await chromium.launch();
@@ -64,9 +72,17 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
   const page = await context.newPage();
   let executorResult: LoopResult;
   try {
-    const browserTools = new PlaywrightBrowserTools(page, ringBufferCap);
-    const executorToolDefs = await fetchAppqToolDefs(executorAllowedAppqTools());
-    const gatedExecutorAppq = createGatedAppqDispatcher(executorAllowedAppqTools());
+    const browserTools = new PlaywrightBrowserTools(page, ringBufferCap, {
+      screenshotSink: async (png, label) => {
+        try {
+          return { ok: true, ref: await client.uploadScreenshot(png, label) };
+        } catch (err) {
+          return { ok: false, note: (err as Error).message };
+        }
+      },
+    });
+    const executorToolDefs = await fetchAppqToolDefs(client, executorAllowedAppqTools());
+    const gatedExecutorAppq = createGatedAppqDispatcher(client, executorAllowedAppqTools());
     const executorDispatch: ToolDispatcher = async (name, args) => {
       if (name.startsWith('browser_')) return browserTools.dispatch(name, args);
       return gatedExecutorAppq(name, args);
@@ -74,6 +90,7 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
 
     executorResult = await runWorkflow({
       source: { kind: 'appq', name: 'appq:autotest-executor', args: { run_id: runId, test_case_uuid: testCaseUuid, url } },
+      fetchPrompt: client.fetchPrompt,
       seedMessage: `Run: ${runId}\nTest case: ${testCaseUuid}\nURL under test: ${url}\nBegin now — start with get_scenario.`,
       tools: [...BROWSER_TOOL_DEFS, ...executorToolDefs],
       dispatch: executorDispatch,
@@ -93,8 +110,8 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
   if (mandatoryNote || dryRunNote) onEvent?.('validator', { type: 'log', detail: `mode:${mandatoryNote}${dryRunNote}` });
 
   const screenshotViewer = new ScreenshotViewer(mandatoryImageCheck);
-  const validatorToolDefs = await fetchAppqToolDefs(validatorAllowedAppqTools());
-  const gatedValidatorAppq = createGatedAppqDispatcher(validatorAllowedAppqTools());
+  const validatorToolDefs = await fetchAppqToolDefs(client, validatorAllowedAppqTools());
+  const gatedValidatorAppq = createGatedAppqDispatcher(client, validatorAllowedAppqTools());
   // Browser-label correction must be OUTERMOST, applied before dry-run's
   // interception decides what to log — otherwise a dry-run's "would call
   // create_defect with..." preview shows the model's own raw (possibly
@@ -109,6 +126,7 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
 
   const validatorResult = await runWorkflow({
     source: { kind: 'appq', name: 'appq:autotest-validator', args: { run_id: runId, test_case_uuid: testCaseUuid } },
+    fetchPrompt: client.fetchPrompt,
     seedMessage: `Run: ${runId}\nTest case: ${testCaseUuid}\nBegin now — start with get_scenario.`,
     tools: [...validatorToolDefs, ...screenshotViewer.toolDefs()],
     dispatch,

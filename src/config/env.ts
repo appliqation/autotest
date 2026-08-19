@@ -1,16 +1,6 @@
 import 'dotenv/config';
-import { DEFAULT_ANTHROPIC_MODEL } from '../providers/anthropic.js';
-import { DEFAULT_OPENAI_MODEL } from '../providers/openai.js';
-
-function required(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`Missing required env var: ${name}`);
-  return value;
-}
-
-function optional(name: string): string | undefined {
-  return process.env[name] || undefined;
-}
+import { DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL } from '@appliqation/agent-core/providers';
+import { required, optional } from '@appliqation/agent-core/config';
 
 export const config = {
   appqOrigin: optional('APPQ_ORIGIN') ?? 'https://appq.appliqation.io',

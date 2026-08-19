@@ -1,6 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { DEFAULT_ANTHROPIC_MODEL } from '../providers/anthropic.js';
-import { DEFAULT_OPENAI_MODEL } from '../providers/openai.js';
+import { DEFAULT_ANTHROPIC_MODEL, DEFAULT_OPENAI_MODEL } from '@appliqation/agent-core/providers';
 
 // The real .env file (this repo's, with real credentials) must never leak
 // into these tests — mock dotenv/config as a no-op so process.env is fully

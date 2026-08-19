@@ -9,24 +9,37 @@
 
 import { Command } from 'commander';
 import { chromium } from 'playwright';
+import {
+  createMcpClient,
+  createAnthropicAdapter,
+  createOpenAiAdapter,
+  PlaywrightBrowserTools,
+  BROWSER_TOOL_DEFS,
+  fetchAppqToolDefs,
+  createGatedAppqDispatcher,
+  runWorkflow,
+  resolveStorageState,
+  knownRolesForProject,
+  inferRole,
+  resolveRun,
+  resolveScenarioId,
+  fetchScenarioInfo,
+  fetchTestSetInfo,
+  scenarioIdFromTcUuid,
+  resolveUrl,
+  type LoopResult,
+  type ProviderAdapter,
+  type ToolDispatcher,
+} from '@appliqation/agent-core';
 import { config, resolveProvider, resolveModel } from '../config/env.js';
-import { createAnthropicAdapter } from '../providers/anthropic.js';
-import { createOpenAiAdapter } from '../providers/openai.js';
-import { PlaywrightBrowserTools, BROWSER_TOOL_DEFS } from '../tools/browserTools.js';
 import { READONLY_APPQ_TOOLS } from '../tools/safety.js';
-import { fetchAppqToolDefs, createGatedAppqDispatcher } from '../tools/appqTools.js';
-import { callTool } from '../appq/mcpClient.js';
-import { runWorkflow } from '../engine/workflowRunner.js';
 import { judgeTc } from '../orchestrator/judgeTc.js';
 import { parseCoveragePolicy, shouldRunAgenticCoverage } from '../orchestrator/coveragePolicy.js';
 import { pollTestResults } from '../orchestrator/pollResults.js';
 import { printJsonSummary, printHumanSummary, exitCodeFor } from './output.js';
-import { resolveStorageState } from '../tools/authState.js';
-import { knownRolesForProject, inferRole } from '../tools/roleInference.js';
-import { resolveRun, resolveScenarioId, fetchScenarioInfo, resolveUrl } from './resolvers.js';
 import type { TcOutcome } from './output.js';
-import type { LoopResult } from '../engine/loop.js';
-import type { ProviderAdapter, ToolDispatcher } from '../types.js';
+
+const client = createMcpClient({ origin: config.appqOrigin, apiKey: config.appqApiKey() });
 
 /** Builds the adapter for a given role — see resolveModel() for why executor/validator can differ. */
 function buildAdapter(role: 'executor' | 'validator'): ProviderAdapter {
@@ -64,6 +77,15 @@ function printResult(label: string, result: LoopResult): void {
   console.log(`\n=== ${label} ===\n`);
   console.log(result.report);
   console.error(`\n(${result.turns} turns, budget exceeded: ${result.budgetExceeded})`);
+}
+
+/** Stages a screenshot via appq's upload endpoint, adapting McpClient.uploadScreenshot to browser tools' generic sink shape. */
+async function appqScreenshotSink(png: Buffer, label: string): Promise<{ ok: true; ref: string } | { ok: false; note: string }> {
+  try {
+    return { ok: true, ref: await client.uploadScreenshot(png, label) };
+  } catch (err) {
+    return { ok: false, note: (err as Error).message };
+  }
 }
 
 const MANDATORY_IMAGE_OPTION = [
@@ -116,9 +138,9 @@ program
     const page = await browser.newPage();
 
     try {
-      const browserTools = new PlaywrightBrowserTools(page, config.evidenceRingBufferCap);
-      const appqToolDefs = await fetchAppqToolDefs(READONLY_APPQ_TOOLS);
-      const gatedAppq = createGatedAppqDispatcher(READONLY_APPQ_TOOLS);
+      const browserTools = new PlaywrightBrowserTools(page, config.evidenceRingBufferCap, { screenshotSink: appqScreenshotSink });
+      const appqToolDefs = await fetchAppqToolDefs(client, READONLY_APPQ_TOOLS);
+      const gatedAppq = createGatedAppqDispatcher(client, READONLY_APPQ_TOOLS);
 
       const dispatch: ToolDispatcher = async (name, args) => {
         if (name.startsWith('browser_')) return browserTools.dispatch(name, args);
@@ -127,6 +149,7 @@ program
 
       const result = await runWorkflow({
         source: { kind: 'appq', name: 'appq:runman', args: { project_id: opts.projectId, site_url: opts.url, prompt: opts.prompt } },
+        fetchPrompt: client.fetchPrompt,
         seedMessage: `Test intent: ${opts.prompt}\nURL under test: ${opts.url}\nBegin now — start with browser_snapshot.`,
         tools: [...BROWSER_TOOL_DEFS, ...appqToolDefs],
         dispatch,
@@ -144,12 +167,14 @@ program
 program
   .command('judge')
   .description(
-    'Judge one test case (--test-case-uuid) or a whole scenario (--scenario-id, no --test-case-uuid), as ' +
-      'genuinely separate executor/validator invocations against appq:autotest-executor / -validator — no ' +
-      "shared context between them, the validator never sees the executor's own conversation, only what it " +
-      'explicitly submitted as evidence. In whole-scenario mode, a coverage policy decides per TC whether the ' +
-      'agentic pair runs at all, alongside whatever the deterministic canonical-script pipeline already does ' +
-      'automatically; the report then covers every TC either way. project_id and url are always derived, never ' +
+    'Judge one test case (--test-case-uuid), a whole scenario (--scenario-id, no --test-case-uuid), or a whole ' +
+      'test set (--test-set-id — the common CI shape: regression/sanity/smoke), as genuinely separate ' +
+      'executor/validator invocations against appq:autotest-executor / -validator — no shared context between ' +
+      "them, the validator never sees the executor's own conversation, only what it explicitly submitted as " +
+      'evidence. In whole-scenario and test-set mode, a coverage policy decides per TC whether the agentic pair ' +
+      'runs at all, alongside whatever the deterministic canonical-script pipeline already does automatically; ' +
+      'the report then covers every TC either way. A test set can span multiple scenarios, so that mode resolves ' +
+      'one run per distinct scenario represented rather than one overall. project_id and url are always derived, never ' +
       'accepted as separate inputs — a caller-supplied value diverging from the real one would either be ' +
       'silently wrong (url, no server-side check) or rejected late (project_id, appq validates it against the ' +
       "scenario) — deriving instead of asking avoids both failure modes, the same reason MCP tools themselves " +
@@ -162,6 +187,13 @@ program
       'not accepted alongside it.',
   )
   .option('--scenario-id <id>', 'scenario ID — required in whole-scenario mode (no --test-case-uuid given)')
+  .option(
+    '--test-set-id <id>',
+    'judge every test case in this test set instead of one TC or one scenario — the common CI case (regression/' +
+      'sanity/smoke suites). A test set can span multiple scenarios; each distinct scenario gets its own run, ' +
+      'created/reused independently, since appq\'s create_run is inherently scenario-scoped. Mutually exclusive ' +
+      'with --test-case-uuid/--scenario-id; --run-id is not supported here (no single run to reuse).',
+  )
   .requiredOption(
     '--environment <name>',
     'environment name — its URL (from get_project_settings) is what the browser navigates to; appq will list ' +
@@ -194,6 +226,7 @@ program
     async (opts: {
       testCaseUuid?: string;
       scenarioId?: string;
+      testSetId?: string;
       environment: string;
       runId?: string;
       role?: string;
@@ -210,9 +243,163 @@ program
       const mandatoryImageCheck = opts.mandatoryImageCheck ?? config.mandatoryImageCheck;
       const dryRun = opts.dryRun ?? false;
 
+      if (opts.testSetId) {
+        // Test-set mode: a test set can span multiple scenarios (appq's own
+        // get_test_set describes it as "a collection of test cases from
+        // different scenarios"), but create_run/update_run_results is
+        // inherently scenario-scoped — so this groups TCs by their own
+        // UUID-derived scenario_id and resolves one run + one
+        // get_automation_readiness check per distinct scenario, not one
+        // overall. --run-id reuse is deliberately not supported here (see
+        // the option's own help text) — there's no single run to reuse.
+        const testSetId = Number(opts.testSetId);
+        const { projectId, tcs } = await fetchTestSetInfo(client, testSetId);
+        const url = await resolveUrl(client, opts.environment, projectId);
+        const knownRoles = knownRolesForProject(projectId);
+        const explicitStorageState = opts.role ? resolveStorageState(projectId, opts.role) : undefined;
+        if (opts.role) console.error(`[setup] authenticated as role "${opts.role}"`);
+
+        const policy = parseCoveragePolicy(opts.coverage);
+        const pollTimeoutMs = opts.pollTimeoutMs ? Number(opts.pollTimeoutMs) : config.pollTimeoutMs;
+
+        if (tcs.length === 0) {
+          console.log('No test cases found in this test set.');
+          return;
+        }
+
+        const byScenario = new Map<number, typeof tcs>();
+        for (const tc of tcs) {
+          const scenarioIdForTc = scenarioIdFromTcUuid(tc.testCaseUuid);
+          if (!byScenario.has(scenarioIdForTc)) byScenario.set(scenarioIdForTc, []);
+          byScenario.get(scenarioIdForTc)!.push(tc);
+        }
+        console.error(
+          `[setup] test set: ${tcs.length} test cases across ${byScenario.size} scenario(s), coverage: ${opts.coverage}`,
+        );
+
+        const runIdByScenario = new Map<number, string>();
+        const canonicalByUuid = new Map<string, boolean>();
+        for (const scenarioIdForGroup of byScenario.keys()) {
+          const readinessResult = await client.callTool('get_automation_readiness', {
+            scenario_id: scenarioIdForGroup,
+            project_id: projectId,
+          });
+          if (readinessResult.ok) {
+            const readiness = (
+              JSON.parse(readinessResult.text) as {
+                readiness: Array<{ test_case_uuid: string; has_canonical_script: boolean }>;
+              }
+            ).readiness;
+            for (const r of readiness) canonicalByUuid.set(r.test_case_uuid, r.has_canonical_script);
+          } else {
+            console.error(`[setup] get_automation_readiness failed for scenario ${scenarioIdForGroup}: ${readinessResult.text}`);
+          }
+          const runId = await resolveRun(client, {
+            scenarioId: String(scenarioIdForGroup),
+            projectId: String(projectId),
+            environment: opts.environment,
+          });
+          runIdByScenario.set(scenarioIdForGroup, runId);
+        }
+        console.error(`[setup] image check: ${mandatoryImageCheck ? 'mandatory' : 'on-demand'}, dry-run: ${dryRun}`);
+
+        const covered: typeof tcs = [];
+        const skipped: typeof tcs = [];
+        for (const scenarioTcs of byScenario.values()) {
+          scenarioTcs.forEach((tc, i) => {
+            const hasCanonical = canonicalByUuid.get(tc.testCaseUuid) ?? false;
+            const runAgentic = shouldRunAgenticCoverage(policy, { tcIndex: i, hasCanonicalScript: hasCanonical });
+            (runAgentic ? covered : skipped).push(tc);
+          });
+        }
+        console.error(`[setup] ${tcs.length} test cases: ${covered.length} get agentic coverage, ${skipped.length} deterministic-only`);
+
+        const inferredStorageStateCache = new Map<string, ReturnType<typeof resolveStorageState>>();
+        for (const tc of covered) {
+          const scenarioIdForTc = scenarioIdFromTcUuid(tc.testCaseUuid);
+          const runId = runIdByScenario.get(scenarioIdForTc)!;
+          console.error(`\n--- judging ${tc.testCaseUuid} (scenario ${scenarioIdForTc}) ---`);
+          try {
+            let storageState = explicitStorageState;
+            if (!opts.role) {
+              const inferredRole = inferRole(tc, knownRoles);
+              if (inferredRole) {
+                if (!inferredStorageStateCache.has(inferredRole)) {
+                  inferredStorageStateCache.set(inferredRole, resolveStorageState(projectId, inferredRole));
+                }
+                storageState = inferredStorageStateCache.get(inferredRole);
+                console.error(`[${tc.testCaseUuid}] authenticated as role "${inferredRole}" (inferred)`);
+              }
+            }
+            const { validatorResult } = await judgeTc({
+              client,
+              runId,
+              testCaseUuid: tc.testCaseUuid,
+              url,
+              storageState,
+              executorAdapter,
+              validatorAdapter,
+              budget: config.budget,
+              mandatoryImageCheck,
+              dryRun,
+              ringBufferCap: config.evidenceRingBufferCap,
+              onEvent: (stage, e) => logEvent(`[${tc.testCaseUuid}:${stage}] `)(e),
+            });
+            console.error(`[${tc.testCaseUuid}] validator finished (${validatorResult.turns} turns)`);
+          } catch (err) {
+            console.error(`[${tc.testCaseUuid}] judge failed: ${(err as Error).message}`);
+          }
+        }
+
+        console.error(`\n[report] polling get_test_results for ${byScenario.size} run(s) (up to ${pollTimeoutMs}ms each)...`);
+        const resultsByUuid = new Map<string, { status: string | null; errorMessage?: string }>();
+        if (!dryRun) {
+          for (const [scenarioIdForGroup, scenarioTcs] of byScenario) {
+            const runId = runIdByScenario.get(scenarioIdForGroup)!;
+            const polled = await pollTestResults(client, {
+              runId,
+              scenarioId: scenarioIdForGroup,
+              wantUuids: new Set(scenarioTcs.map((t) => t.testCaseUuid)),
+              timeoutMs: pollTimeoutMs,
+              intervalMs: config.pollIntervalMs,
+            });
+            for (const [uuid, result] of polled) resultsByUuid.set(uuid, result);
+          }
+        }
+
+        const outcomes: TcOutcome[] = tcs.map((tc) => {
+          const scenarioIdForTc = scenarioIdFromTcUuid(tc.testCaseUuid);
+          const hasCanonical = canonicalByUuid.get(tc.testCaseUuid) ?? false;
+          const isCovered = covered.some((c) => c.testCaseUuid === tc.testCaseUuid);
+          const path: TcOutcome['path'] = isCovered ? (hasCanonical ? 'canonical script + agentic' : 'agentic') : 'canonical script';
+          const result = resultsByUuid.get(tc.testCaseUuid);
+          const status = dryRun ? 'dry-run' : (result?.status ?? 'pending');
+          return {
+            testCaseUuid: tc.testCaseUuid,
+            path,
+            status,
+            errorMessage: result?.errorMessage,
+            runId: runIdByScenario.get(scenarioIdForTc),
+            scenarioId: scenarioIdForTc,
+          };
+        });
+
+        const summary = { testSetId, dryRun, results: outcomes };
+        if (json) printJsonSummary(summary);
+        else printHumanSummary(summary);
+
+        const pending = outcomes.filter((o) => o.status === 'pending').length;
+        if (!dryRun && pending > 0 && !json) {
+          console.error(`\n${pending} test case(s) hadn't settled by the poll timeout — check the runs directly for the final state.`);
+        }
+
+        process.exitCode = exitCodeFor(summary);
+        return;
+      }
+
       const scenarioId = resolveScenarioId(opts);
-      const { projectId, tcs } = await fetchScenarioInfo(scenarioId);
-      const url = await resolveUrl(opts.environment, projectId);
+      const { projectId, tcs } = await fetchScenarioInfo(client, scenarioId);
+      const url = await resolveUrl(client, opts.environment, projectId);
       // --role is an explicit override, resolved once and used uniformly —
       // unchanged from before. Without it, per-TC role inference kicks in
       // automatically wherever a TC's tag/name gives a confident signal
@@ -221,7 +408,7 @@ program
       const knownRoles = knownRolesForProject(projectId);
       const explicitStorageState = opts.role ? resolveStorageState(projectId, opts.role) : undefined;
       if (opts.role) console.error(`[setup] authenticated as role "${opts.role}"`);
-      const runId = await resolveRun({
+      const runId = await resolveRun(client, {
         runId: opts.runId,
         scenarioId: String(scenarioId),
         projectId: String(projectId),
@@ -242,6 +429,7 @@ program
           }
         }
         const { executorResult, validatorResult } = await judgeTc({
+          client,
           runId,
           testCaseUuid,
           url,
@@ -266,7 +454,7 @@ program
         let status = 'dry-run';
         let errorMessage: string | undefined;
         if (!dryRun) {
-          const polled = await pollTestResults({
+          const polled = await pollTestResults(client, {
             runId,
             scenarioId,
             wantUuids: new Set([testCaseUuid]),
@@ -291,7 +479,7 @@ program
       const pollTimeoutMs = opts.pollTimeoutMs ? Number(opts.pollTimeoutMs) : config.pollTimeoutMs;
       console.error(`[setup] coverage: ${opts.coverage}`);
 
-      const readinessResult = await callTool('get_automation_readiness', { scenario_id: scenarioId, project_id: projectId });
+      const readinessResult = await client.callTool('get_automation_readiness', { scenario_id: scenarioId, project_id: projectId });
       if (!readinessResult.ok) throw new Error(`get_automation_readiness failed: ${readinessResult.text}`);
       const readiness = (
         JSON.parse(readinessResult.text) as {
@@ -335,6 +523,7 @@ program
             }
           }
           const { validatorResult } = await judgeTc({
+            client,
             runId,
             testCaseUuid: tcUuid,
             url,
@@ -361,7 +550,7 @@ program
       const allUuids = new Set(readiness.map((r) => r.test_case_uuid));
       const results = dryRun
         ? new Map() // nothing was actually written in dry-run mode — nothing to poll for
-        : await pollTestResults({
+        : await pollTestResults(client, {
             runId,
             scenarioId,
             wantUuids: allUuids,
