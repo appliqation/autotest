@@ -3,14 +3,17 @@
 // scenario) share exactly one implementation rather than two copies that
 // can drift.
 
-import { chromium } from 'playwright';
+import { chromium, request } from 'playwright';
 import type { BrowserContextOptions } from 'playwright';
 import {
   PlaywrightBrowserTools,
   BROWSER_TOOL_DEFS,
+  ApiRequestTools,
+  API_TOOL_DEFS,
   fetchAppqToolDefs,
   createGatedAppqDispatcher,
   runWorkflow,
+  type ApiAuthHeader,
   type LoopResult,
   type McpClient,
   type ProviderAdapter,
@@ -28,12 +31,27 @@ export interface JudgeTcOptions {
   testCaseUuid: string;
   url: string;
   /**
+   * "ui" (default) drives a real Playwright browser via browser_* tools.
+   * "api" drives a real HTTP client via http_request instead — no browser
+   * is launched at all. Resolved once by the caller from the TC's own tag
+   * (isApiTest(), from @appliqation/agent-core) before this runs.
+   */
+  testType?: 'ui' | 'api';
+  /**
    * Playwright storageState (cookies/localStorage) for an authenticated
    * session, resolved once by the caller via resolveStorageState() (from
    * @appliqation/agent-core) and reused across every TC in a run. Only the
    * executor's browser context uses this; the validator never launches one.
+   * Ignored when testType is "api" — see apiAuthHeader instead.
    */
   storageState?: BrowserContextOptions['storageState'];
+  /**
+   * BYO API credential for the executor's http_request calls, resolved
+   * once by the caller via resolveApiAuth() (from @appliqation/agent-core)
+   * and injected into every request at the APIRequestContext level — never
+   * exposed to the model. Ignored when testType is "ui".
+   */
+  apiAuthHeader?: ApiAuthHeader;
   /**
    * Deliberately separate adapters, not one shared instance — see
    * config/env.ts's resolveModel(): the validator's judgment is closer to
@@ -58,48 +76,84 @@ export interface JudgeTcResult {
 }
 
 export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
-  const { client, runId, testCaseUuid, url, storageState, executorAdapter, validatorAdapter, budget, mandatoryImageCheck, dryRun, ringBufferCap, onEvent } = opts;
+  const { client, runId, testCaseUuid, url, storageState, apiAuthHeader, executorAdapter, validatorAdapter, budget, mandatoryImageCheck, dryRun, ringBufferCap, onEvent } = opts;
+  const testType = opts.testType ?? 'ui';
 
-  // Stage 1: executor. Drives a real browser; may write only evidence.
-  const browser = await chromium.launch();
-  // Captured before the browser closes below — Stage 2 never launches its
-  // own browser, so this is the only point with access to the real version.
-  const browserLabel = formatBrowserLabel(browser.version());
-  // browser.newPage() is Playwright's single-context convenience shortcut —
-  // switch to an explicit context so storageState has something to attach
-  // to. No behavior change when storageState is undefined (today's path).
-  const context = await browser.newContext(storageState ? { storageState } : {});
-  const page = await context.newPage();
+  const executorToolDefs = await fetchAppqToolDefs(client, executorAllowedAppqTools());
+  const gatedExecutorAppq = createGatedAppqDispatcher(client, executorAllowedAppqTools());
+
   let executorResult: LoopResult;
-  try {
-    const browserTools = new PlaywrightBrowserTools(page, ringBufferCap, {
-      screenshotSink: async (png, label) => {
-        try {
-          return { ok: true, ref: await client.uploadScreenshot(png, label) };
-        } catch (err) {
-          return { ok: false, note: (err as Error).message };
-        }
-      },
-    });
-    const executorToolDefs = await fetchAppqToolDefs(client, executorAllowedAppqTools());
-    const gatedExecutorAppq = createGatedAppqDispatcher(client, executorAllowedAppqTools());
-    const executorDispatch: ToolDispatcher = async (name, args) => {
-      if (name.startsWith('browser_')) return browserTools.dispatch(name, args);
-      return gatedExecutorAppq(name, args);
-    };
+  let browserLabel: string;
 
-    executorResult = await runWorkflow({
-      source: { kind: 'appq', name: 'appq:autotest-executor', args: { run_id: runId, test_case_uuid: testCaseUuid, url } },
-      fetchPrompt: client.fetchPrompt,
-      seedMessage: `Run: ${runId}\nTest case: ${testCaseUuid}\nURL under test: ${url}\nBegin now — start with get_scenario.`,
-      tools: [...BROWSER_TOOL_DEFS, ...executorToolDefs],
-      dispatch: executorDispatch,
-      adapter: executorAdapter,
-      budget,
-      onEvent: (e) => onEvent?.('executor', e),
+  if (testType === 'api') {
+    // Stage 1 (API path): a real HTTP client, no browser launched at all.
+    // Captured before the context disposes below — Stage 2 never makes its
+    // own request, so this is the only point that needs to know the mode.
+    browserLabel = 'API';
+    const apiContext = await request.newContext({
+      baseURL: url,
+      extraHTTPHeaders: apiAuthHeader ? { [apiAuthHeader.name]: apiAuthHeader.value } : undefined,
     });
-  } finally {
-    await browser.close();
+    try {
+      const apiTools = new ApiRequestTools(apiContext, dryRun);
+      const apiDispatch: ToolDispatcher = async (name, args) => {
+        if (name === 'http_request') return apiTools.dispatch(name, args);
+        return gatedExecutorAppq(name, args);
+      };
+
+      executorResult = await runWorkflow({
+        source: { kind: 'appq', name: 'appq:autotest-executor', args: { run_id: runId, test_case_uuid: testCaseUuid, url, test_type: 'api' } },
+        fetchPrompt: client.fetchPrompt,
+        seedMessage: `Run: ${runId}\nTest case: ${testCaseUuid}\nBase URL: ${url}\nBegin now — start with get_scenario.`,
+        tools: [...API_TOOL_DEFS, ...executorToolDefs],
+        dispatch: apiDispatch,
+        adapter: executorAdapter,
+        budget,
+        onEvent: (e) => onEvent?.('executor', e),
+      });
+    } finally {
+      await apiContext.dispose();
+    }
+  }
+  else {
+    // Stage 1 (UI path): drives a real browser; may write only evidence.
+    const browser = await chromium.launch();
+    // Captured before the browser closes below — Stage 2 never launches its
+    // own browser, so this is the only point with access to the real version.
+    browserLabel = formatBrowserLabel(browser.version());
+    // browser.newPage() is Playwright's single-context convenience shortcut —
+    // switch to an explicit context so storageState has something to attach
+    // to. No behavior change when storageState is undefined (today's path).
+    const context = await browser.newContext(storageState ? { storageState } : {});
+    const page = await context.newPage();
+    try {
+      const browserTools = new PlaywrightBrowserTools(page, ringBufferCap, {
+        screenshotSink: async (png, label) => {
+          try {
+            return { ok: true, ref: await client.uploadScreenshot(png, label) };
+          } catch (err) {
+            return { ok: false, note: (err as Error).message };
+          }
+        },
+      });
+      const executorDispatch: ToolDispatcher = async (name, args) => {
+        if (name.startsWith('browser_')) return browserTools.dispatch(name, args);
+        return gatedExecutorAppq(name, args);
+      };
+
+      executorResult = await runWorkflow({
+        source: { kind: 'appq', name: 'appq:autotest-executor', args: { run_id: runId, test_case_uuid: testCaseUuid, url } },
+        fetchPrompt: client.fetchPrompt,
+        seedMessage: `Run: ${runId}\nTest case: ${testCaseUuid}\nURL under test: ${url}\nBegin now — start with get_scenario.`,
+        tools: [...BROWSER_TOOL_DEFS, ...executorToolDefs],
+        dispatch: executorDispatch,
+        adapter: executorAdapter,
+        budget,
+        onEvent: (e) => onEvent?.('executor', e),
+      });
+    } finally {
+      await browser.close();
+    }
   }
 
   // Stage 2: validator. A genuinely fresh runWorkflow() call — no browser
@@ -125,7 +179,7 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
   );
 
   const validatorResult = await runWorkflow({
-    source: { kind: 'appq', name: 'appq:autotest-validator', args: { run_id: runId, test_case_uuid: testCaseUuid } },
+    source: { kind: 'appq', name: 'appq:autotest-validator', args: { run_id: runId, test_case_uuid: testCaseUuid, test_type: testType } },
     fetchPrompt: client.fetchPrompt,
     seedMessage: `Run: ${runId}\nTest case: ${testCaseUuid}\nBegin now — start with get_scenario.`,
     tools: [...validatorToolDefs, ...screenshotViewer.toolDefs()],

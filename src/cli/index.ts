@@ -1,26 +1,26 @@
 #!/usr/bin/env node
-// Phase 1 (`runman`): prove the engine against a workflow that already
-// exists in production, zero appq changes. Phase 2 (`judge`): the
-// two-stage executor/validator pattern for one TC, against the real
-// appq:autotest-* workflows. Phase 5 (`run`): the same pattern applied
-// across a whole scenario, with a coverage policy deciding per TC whether
-// agentic coverage runs alongside whatever the deterministic pipeline
-// already does automatically.
+// `judge`: the two-stage executor/validator pattern for one TC, against the
+// real appq:autotest-* workflows — also applied across a whole scenario or
+// test set, with a coverage policy deciding per TC whether agentic coverage
+// runs alongside whatever the deterministic pipeline already does
+// automatically. Open-ended exploratory QA (the former `runman` command,
+// Phase 1's engine proof) has moved to its own dedicated agent,
+// appliqation-explorer — see that repo's CLAUDE.md.
 
 import { Command } from 'commander';
-import { chromium } from 'playwright';
 import {
   createMcpClient,
   createAnthropicAdapter,
   createOpenAiAdapter,
-  PlaywrightBrowserTools,
-  BROWSER_TOOL_DEFS,
+  createUsageAccumulator,
   fetchAppqToolDefs,
   createGatedAppqDispatcher,
   runWorkflow,
   resolveStorageState,
+  resolveApiAuth,
   knownRolesForProject,
   inferRole,
+  isApiTest,
   resolveRun,
   resolveScenarioId,
   fetchScenarioInfo,
@@ -36,8 +36,9 @@ import { READONLY_APPQ_TOOLS } from '../tools/safety.js';
 import { judgeTc } from '../orchestrator/judgeTc.js';
 import { parseCoveragePolicy, shouldRunAgenticCoverage } from '../orchestrator/coveragePolicy.js';
 import { pollTestResults } from '../orchestrator/pollResults.js';
+import { recordJudgeRun } from './audit.js';
 import { printJsonSummary, printHumanSummary, exitCodeFor } from './output.js';
-import type { TcOutcome } from './output.js';
+import type { TcOutcome, RunSummary } from './output.js';
 
 const client = createMcpClient({ origin: config.appqOrigin, apiKey: config.appqApiKey() });
 
@@ -50,7 +51,7 @@ function buildAdapter(role: 'executor' | 'validator'): ProviderAdapter {
     : createOpenAiAdapter(config.openaiApiKey!, model, config.openaiMaxOutputTokens);
 }
 
-function logEvent(prefix: string) {
+function logEvent(prefix: string, onUsage?: (u: { inputTokens: number; outputTokens: number; cacheWriteTokens?: number; cacheReadTokens?: number }) => void) {
   return (e: { type: string; detail?: unknown }) => {
     if (e.type === 'assistant') {
       const text = ((e.detail as string) ?? '').trim();
@@ -63,6 +64,7 @@ function logEvent(prefix: string) {
       console.error(`${prefix}[log] ${e.detail}`);
     } else if (e.type === 'usage') {
       const u = e.detail as { inputTokens: number; outputTokens: number; cacheWriteTokens?: number; cacheReadTokens?: number };
+      onUsage?.(u);
       const cacheNote = u.cacheReadTokens
         ? ` (${u.cacheReadTokens} from cache)`
         : u.cacheWriteTokens
@@ -77,15 +79,6 @@ function printResult(label: string, result: LoopResult): void {
   console.log(`\n=== ${label} ===\n`);
   console.log(result.report);
   console.error(`\n(${result.turns} turns, budget exceeded: ${result.budgetExceeded})`);
-}
-
-/** Stages a screenshot via appq's upload endpoint, adapting McpClient.uploadScreenshot to browser tools' generic sink shape. */
-async function appqScreenshotSink(png: Buffer, label: string): Promise<{ ok: true; ref: string } | { ok: false; note: string }> {
-  try {
-    return { ok: true, ref: await client.uploadScreenshot(png, label) };
-  } catch (err) {
-    return { ok: false, note: (err as Error).message };
-  }
 }
 
 const MANDATORY_IMAGE_OPTION = [
@@ -119,50 +112,6 @@ const program = new Command();
 program
   .name('appliqation-autotest')
   .description('Standalone autonomous testing agent that executes Appliqation MCP workflows.');
-
-program
-  .command('runman')
-  .description(
-    'Phase 1 proof: run the existing, already-registered appq:runman workflow against a real target. ' +
-      'Validates the engine (fetch, tool-calling loop, budget caps, safety gate) with zero appq changes.',
-  )
-  .requiredOption('--url <url>', 'target URL to explore')
-  .option('--project-id <id>', 'appq project id, passed through to the runman prompt')
-  .option('--prompt <text>', 'what to test/explore', 'Explore this page like a senior QA lead.')
-  .action(async (opts: { url: string; projectId?: string; prompt: string }) => {
-    // Same shape of task as the executor role (open-ended browser-driven
-    // exploration) — reuse its model resolution rather than inventing a
-    // third role.
-    const adapter = buildAdapter('executor');
-    const browser = await chromium.launch();
-    const page = await browser.newPage();
-
-    try {
-      const browserTools = new PlaywrightBrowserTools(page, config.evidenceRingBufferCap, { screenshotSink: appqScreenshotSink });
-      const appqToolDefs = await fetchAppqToolDefs(client, READONLY_APPQ_TOOLS);
-      const gatedAppq = createGatedAppqDispatcher(client, READONLY_APPQ_TOOLS);
-
-      const dispatch: ToolDispatcher = async (name, args) => {
-        if (name.startsWith('browser_')) return browserTools.dispatch(name, args);
-        return gatedAppq(name, args);
-      };
-
-      const result = await runWorkflow({
-        source: { kind: 'appq', name: 'appq:runman', args: { project_id: opts.projectId, site_url: opts.url, prompt: opts.prompt } },
-        fetchPrompt: client.fetchPrompt,
-        seedMessage: `Test intent: ${opts.prompt}\nURL under test: ${opts.url}\nBegin now — start with browser_snapshot.`,
-        tools: [...BROWSER_TOOL_DEFS, ...appqToolDefs],
-        dispatch,
-        adapter,
-        budget: config.budget,
-        onEvent: logEvent(''),
-      });
-
-      printResult('Report', result);
-    } finally {
-      await browser.close();
-    }
-  });
 
 program
   .command('judge')
@@ -215,6 +164,13 @@ program
     'on-script-absence',
   )
   .option(
+    '--test-type <ui|api>',
+    'force ui (browser) or api (http_request) execution for every TC this invocation touches — same override ' +
+      'shape as --role. Omit and each TC\'s own tag decides instead (isApiTest() — an "API" tag means api, ' +
+      'anything else means ui), which is the normal path in scenario/test-set mode where TCs can legitimately ' +
+      'mix both kinds.',
+  )
+  .option(
     '--poll-timeout-ms <ms>',
     'whole-scenario mode: how long to wait for the deterministic path to settle before reporting. Defaults to POLL_TIMEOUT_MS.',
   )
@@ -230,6 +186,7 @@ program
       environment: string;
       runId?: string;
       role?: string;
+      testType?: string;
       coverage: string;
       pollTimeoutMs?: string;
       mandatoryImageCheck?: boolean;
@@ -243,7 +200,22 @@ program
       const mandatoryImageCheck = opts.mandatoryImageCheck ?? config.mandatoryImageCheck;
       const dryRun = opts.dryRun ?? false;
 
-      if (opts.testSetId) {
+      // Audit scaffolding — one record per invocation regardless of which
+      // mode below actually runs (single-TC/whole-scenario/test-set all
+      // converge on the same RunSummary shape). `summary` stays undefined
+      // for the two "no test cases found" early-return paths — the finally
+      // still fires and records that outcome, just with an empty result set.
+      const startedAt = Date.now();
+      const usage = createUsageAccumulator();
+      let summary: RunSummary | undefined;
+
+      try {
+        if (opts.testType && opts.testType !== 'ui' && opts.testType !== 'api') {
+          throw new Error(`--test-type must be "ui" or "api", got "${opts.testType}"`);
+        }
+        const explicitTestType = opts.testType as 'ui' | 'api' | undefined;
+
+        if (opts.testSetId) {
         // Test-set mode: a test set can span multiple scenarios (appq's own
         // get_test_set describes it as "a collection of test cases from
         // different scenarios"), but create_run/update_run_results is
@@ -320,10 +292,13 @@ program
           const runId = runIdByScenario.get(scenarioIdForTc)!;
           console.error(`\n--- judging ${tc.testCaseUuid} (scenario ${scenarioIdForTc}) ---`);
           try {
+            const testType = explicitTestType ?? (isApiTest(tc) ? 'api' : 'ui');
             let storageState = explicitStorageState;
+            let role = opts.role;
             if (!opts.role) {
               const inferredRole = inferRole(tc, knownRoles);
               if (inferredRole) {
+                role = inferredRole;
                 if (!inferredStorageStateCache.has(inferredRole)) {
                   inferredStorageStateCache.set(inferredRole, resolveStorageState(projectId, inferredRole));
                 }
@@ -331,19 +306,22 @@ program
                 console.error(`[${tc.testCaseUuid}] authenticated as role "${inferredRole}" (inferred)`);
               }
             }
+            const apiAuthHeader = testType === 'api' && role ? resolveApiAuth(projectId, role) : undefined;
             const { validatorResult } = await judgeTc({
               client,
               runId,
               testCaseUuid: tc.testCaseUuid,
               url,
+              testType,
               storageState,
+              apiAuthHeader,
               executorAdapter,
               validatorAdapter,
               budget: config.budget,
               mandatoryImageCheck,
               dryRun,
               ringBufferCap: config.evidenceRingBufferCap,
-              onEvent: (stage, e) => logEvent(`[${tc.testCaseUuid}:${stage}] `)(e),
+              onEvent: (stage, e) => logEvent(`[${tc.testCaseUuid}:${stage}] `, usage.onUsage)(e),
             });
             console.error(`[${tc.testCaseUuid}] validator finished (${validatorResult.turns} turns)`);
           } catch (err) {
@@ -384,7 +362,7 @@ program
           };
         });
 
-        const summary = { testSetId, dryRun, results: outcomes };
+        summary = { testSetId, dryRun, results: outcomes };
         if (json) printJsonSummary(summary);
         else printHumanSummary(summary);
 
@@ -419,28 +397,34 @@ program
       if (opts.testCaseUuid) {
         // Single-TC mode: unconditional executor/validator pair, no coverage decision.
         const testCaseUuid = opts.testCaseUuid;
+        const tcInfo = tcs.find((t) => t.testCaseUuid === testCaseUuid);
+        const testType = explicitTestType ?? (tcInfo && isApiTest(tcInfo) ? 'api' : 'ui');
         let storageState = explicitStorageState;
+        let role = opts.role;
         if (!opts.role) {
-          const tcInfo = tcs.find((t) => t.testCaseUuid === testCaseUuid);
           const inferredRole = tcInfo ? inferRole(tcInfo, knownRoles) : null;
           if (inferredRole) {
+            role = inferredRole;
             storageState = resolveStorageState(projectId, inferredRole);
             console.error(`[setup] authenticated as role "${inferredRole}" (inferred)`);
           }
         }
+        const apiAuthHeader = testType === 'api' && role ? resolveApiAuth(projectId, role) : undefined;
         const { executorResult, validatorResult } = await judgeTc({
           client,
           runId,
           testCaseUuid,
           url,
+          testType,
           storageState,
+          apiAuthHeader,
           executorAdapter,
           validatorAdapter,
           budget: config.budget,
           mandatoryImageCheck,
           dryRun,
           ringBufferCap: config.evidenceRingBufferCap,
-          onEvent: (stage, e) => logEvent(`[${stage}] `)(e),
+          onEvent: (stage, e) => logEvent(`[${stage}] `, usage.onUsage)(e),
         });
 
         if (!json) {
@@ -467,7 +451,7 @@ program
         }
 
         const outcome: TcOutcome = { testCaseUuid, path: 'agentic', status, errorMessage };
-        const summary = { runId, scenarioId, dryRun, results: [outcome] };
+        summary = { runId, scenarioId, dryRun, results: [outcome] };
         if (json) printJsonSummary(summary);
         else printHumanSummary(summary);
         process.exitCode = exitCodeFor(summary);
@@ -510,11 +494,14 @@ program
       for (const tcUuid of covered) {
         console.error(`\n--- judging ${tcUuid} ---`);
         try {
+          const tcInfo = tcs.find((t) => t.testCaseUuid === tcUuid);
+          const testType = explicitTestType ?? (tcInfo && isApiTest(tcInfo) ? 'api' : 'ui');
           let storageState = explicitStorageState;
+          let role = opts.role;
           if (!opts.role) {
-            const tcInfo = tcs.find((t) => t.testCaseUuid === tcUuid);
             const inferredRole = tcInfo ? inferRole(tcInfo, knownRoles) : null;
             if (inferredRole) {
+              role = inferredRole;
               if (!inferredStorageStateCache.has(inferredRole)) {
                 inferredStorageStateCache.set(inferredRole, resolveStorageState(projectId, inferredRole));
               }
@@ -522,19 +509,22 @@ program
               console.error(`[${tcUuid}] authenticated as role "${inferredRole}" (inferred)`);
             }
           }
+          const apiAuthHeader = testType === 'api' && role ? resolveApiAuth(projectId, role) : undefined;
           const { validatorResult } = await judgeTc({
             client,
             runId,
             testCaseUuid: tcUuid,
             url,
+            testType,
             storageState,
+            apiAuthHeader,
             executorAdapter,
             validatorAdapter,
             budget: config.budget,
             mandatoryImageCheck,
             dryRun,
             ringBufferCap: config.evidenceRingBufferCap,
-            onEvent: (stage, e) => logEvent(`[${tcUuid}:${stage}] `)(e),
+            onEvent: (stage, e) => logEvent(`[${tcUuid}:${stage}] `, usage.onUsage)(e),
           });
           console.error(`[${tcUuid}] validator finished (${validatorResult.turns} turns)`);
         } catch (err) {
@@ -568,7 +558,7 @@ program
         const status = dryRun ? 'dry-run' : (result?.status ?? 'pending');
         return { testCaseUuid: tc.test_case_uuid, path, status, errorMessage: result?.errorMessage };
       });
-      const summary = { runId, scenarioId, dryRun, results: outcomes };
+      summary = { runId, scenarioId, dryRun, results: outcomes };
       if (json) printJsonSummary(summary);
       else printHumanSummary(summary);
 
@@ -578,6 +568,23 @@ program
       }
 
       process.exitCode = exitCodeFor(summary);
+      } finally {
+        // Audit write happens whether the run succeeded, threw, or hit an
+        // early "no test cases found" return (summary stays undefined in
+        // that case) — see @appliqation/agent-core's audit/sink.ts:
+        // safeRecord() (used inside recordJudgeRun) never lets a
+        // failed/unreachable audit sink affect this process's real outcome.
+        await recordJudgeRun({
+          sink: config.auditSink,
+          startedAt,
+          endedAt: Date.now(),
+          executorModel: resolveModel('executor'),
+          validatorModel: resolveModel('validator'),
+          usage: usage.totals(),
+          exitCode: Number(process.exitCode ?? 0),
+          summary,
+        });
+      }
     },
   );
 

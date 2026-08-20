@@ -24,7 +24,7 @@ called for local specs/stubs standing in for appq's tools; instead, the real
 were built directly on appq's `appq/autotest-mcp-tools` branch (isolated from the other
 feature in flight there), so there was never a stub to build or later swap out.
 
-**Current phase: Phase 5 verified live, Phase 6 (CI polish) done, test-set mode (`judge --test-set-id`) added and verified live.**
+**Current phase: Phase 5 verified live, Phase 6 (CI polish) done, test-set mode (`judge --test-set-id`) added and verified live. The `runman` command (Phase 1's engine proof) has been removed — replaced outright by the dedicated `appliqation-explorer` agent, which offers the same real `appq:runman` workflow more capability (resize/tabs/evaluate, a configurable budget, read-only project-context awareness) than this command ever did.**
 The appq side is done and verified: `appq:autotest-executor`/`-validator`/`autotest`,
 `get_automation_readiness`, `submit_execution_evidence`/`get_execution_evidence`, and the
 `blocked` status enum are all deployed to the real origin and confirmed working by direct
@@ -256,8 +256,7 @@ the identical executor→evidence→validator→verdict flow as before the migra
 ## Where to find what
 
 **Local to this repo:**
-- `src/cli/` — CLI entrypoints. `runman` (Phase 1) proves the engine against the
-  existing, real `appq:runman` workflow. `judge` (Phase 2 + 5, merged) runs one test case
+- `src/cli/` — CLI entrypoints. `judge` (Phase 2 + 5, merged) runs one test case
   or a whole scenario, branching on whether `--test-case-uuid` is given. Single-TC mode:
   two genuinely separate `runWorkflow()` invocations — `appq:autotest-executor` then
   `appq:autotest-validator` — with a plain, non-LLM-mediated `update_run_results`
@@ -307,20 +306,32 @@ the identical executor→evidence→validator→verdict flow as before the migra
   `failed`/`blocked`/`pending` (poll-timeout), so a CI job can gate on the process exit
   code without scraping prose. Progress logs (`onEvent` → `console.error`) are untouched
   by this; it only changes the final-outcome rendering on stdout.
+- `src/cli/audit.ts` — `recordJudgeRun()`, extracted out of `cli/index.ts` for the same
+  testability reason as `cli/resolvers.ts`. One audit record per `judge` invocation
+  regardless of mode (single-TC/whole-scenario/test-set all converge on the same
+  `RunSummary` shape as `outcome`) — `cli/index.ts`'s whole action body is wrapped in a
+  single `try/finally` (`summary` hoisted to a `let` the three modes assign into) so the
+  write fires exactly once whichever branch runs, including the two "no test cases
+  found" early returns (`summary` stays `undefined` there, recorded as a real, non-error
+  outcome). `model` is a combined `executor:<model> validator:<model>` string, since
+  this is the one agent in the family with two genuinely different models per run.
 - `src/config/env.ts` — this app's own frozen `config` object + `resolveProvider()`/
   `resolveModel(role)`, built from `@appliqation/agent-core/config`'s shared `required()`/
   `optional()` primitives (a shared config *schema*/singleton was deliberately not built —
-  each agent's `.env` shape is genuinely different).
+  each agent's `.env` shape is genuinely different). `auditSink` resolves
+  `AUDIT_MONGO_*`/`AUDIT_JSONL_PATH` via `@appliqation/agent-core/audit`'s
+  `resolveAuditSink()` — opt-in, no-op when unconfigured.
 
 **In `@appliqation/agent-core`** (`~/Sites/localhost/appliqation-agent-core/`, imported as
 `@appliqation/agent-core` and its subpaths) — the generic, workflow-agnostic core meant to
 be reused by every sibling agent, not just this one:
 - `/engine` — `loop.ts` (think→act→observe), `budget.ts` (call/page/time caps),
   `workflowRunner.ts` (fetches a named appq workflow and runs it through the loop as one
-  fresh-context invocation — the same function backs both `runman` and each stage of
-  `judge`; two calls to it with no shared `messages` array is the entire mechanism behind
-  executor/validator isolation, nothing fancier). Takes an explicit `fetchPrompt` function
-  now rather than importing one, so it has zero appq-specific coupling.
+  fresh-context invocation — the same function backs each stage of `judge`; two calls to
+  it with no shared `messages` array is the entire mechanism behind executor/validator
+  isolation, nothing fancier). Takes an explicit `fetchPrompt` function now rather than
+  importing one, so it has zero appq-specific coupling. Also what `appliqation-explorer`
+  is built on for its own `appq:runman` invocation — see that repo's `CLAUDE.md`.
 - `/appq` — `mcpClient.ts` (`createMcpClient({origin, apiKey})` factory: `fetchPrompt()`
   (`prompts/get` — pass the **full** name, e.g. `appq:runman`, not the short
   `start_workflow` name), `startWorkflow()`, `callTool()`, `listTools()`,
@@ -387,7 +398,6 @@ be reused by every sibling agent, not just this one:
 - `npm run dev -- <command>` — run the CLI via `tsx` without building
 - `npm run build` / `npm run typecheck`
 - `npm test` / `npm run test:watch` — vitest, colocated `src/**/*.test.ts` files
-- `npx tsx src/cli/index.ts runman --url <target> --project-id <id>` — Phase 1 proof run
 - `npx tsx src/cli/index.ts judge --test-case-uuid <uuid> --environment <name>`
   — one TC. `--environment` is required (its URL is looked up, never taken directly);
   project_id/scenario_id are always derived, not accepted as options. Pass `--run-id` to
