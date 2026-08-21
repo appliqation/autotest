@@ -35,7 +35,7 @@ sequenceDiagram
 ## Quick start
 
 ```bash
-npm install -g appliqation-autotest
+npm install -g @appliqation/autotest
 npx playwright install chromium
 ```
 
