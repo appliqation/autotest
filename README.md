@@ -35,19 +35,23 @@ sequenceDiagram
 ## Quick start
 
 ```bash
-git clone https://github.com/appliqation/appliqation-autotest.git
-cd appliqation-autotest
-npm install
-cp .env.example .env   # fill in APPQ_API_KEY and one LLM provider key
-npm run build
+npm install -g appliqation-autotest
+npx playwright install chromium
+```
+
+Create a `.env` file (in whatever directory you'll run it from) with:
+
+```
+APPQ_API_KEY=your-appliqation-api-key
+ANTHROPIC_API_KEY=your-anthropic-key   # or OPENAI_API_KEY — pick one
 ```
 
 ```bash
 # one test case
-npx appliqation-autotest judge --test-case-uuid <uuid> --environment Stage --dry-run
+appliqation-autotest judge --test-case-uuid <uuid> --environment Stage --dry-run
 
 # a whole test set (regression / sanity / smoke — the common CI shape)
-npx appliqation-autotest judge --test-set-id <id> --environment Stage --dry-run
+appliqation-autotest judge --test-set-id <id> --environment Stage --dry-run
 ```
 
 `--dry-run` is the recommended default for your first run against a real project — it computes real verdicts but suppresses the actual Appliqation writeback. Drop it once you trust the result. `--coverage` (`always` / `on-script-absence` / `sampled:N` / `external`) controls when this agentic pass runs alongside your existing deterministic Playwright pipeline in scenario/test-set mode; `--json`/`--ci` give a structured summary and a CI-friendly exit code.
@@ -59,6 +63,10 @@ Copy `.env.example` to `.env`. Requires `APPQ_API_KEY` and one of `ANTHROPIC_API
 ## Development
 
 ```bash
+git clone https://github.com/appliqation/appliqation-autotest.git
+cd appliqation-autotest
+npm install
+cp .env.example .env   # fill in APPQ_API_KEY and one LLM provider key
 npm run dev -- judge --test-case-uuid <uuid> --environment <name>
 npm run typecheck
 npm test
