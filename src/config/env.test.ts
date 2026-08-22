@@ -122,7 +122,7 @@ describe('config defaults', () => {
   it('falls back to documented default values for unset budget/timing knobs', async () => {
     process.env.ANTHROPIC_API_KEY = 'a';
     const { config } = await freshEnv();
-    expect(config.budget).toEqual({ maxCalls: 50, maxPages: 12, maxMillis: 15 * 60 * 1000, maxTurns: 80 });
+    expect(config.budget).toEqual({ maxCalls: 50, maxPages: 12, maxMillis: 15 * 60 * 1000, maxTurns: 80, maxTotalTokens: 2_000_000 });
     expect(config.mandatoryImageCheck).toBe(false);
     expect(config.appqOrigin).toBe('https://appq.appliqation.io');
   });
