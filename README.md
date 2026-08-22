@@ -63,8 +63,8 @@ Copy `.env.example` to `.env`. Requires `APPQ_API_KEY` and one of `ANTHROPIC_API
 ## Development
 
 ```bash
-git clone https://github.com/appliqation/appliqation-autotest.git
-cd appliqation-autotest
+git clone https://github.com/appliqation/autotest.git
+cd autotest
 npm install
 cp .env.example .env   # fill in APPQ_API_KEY and one LLM provider key
 npm run dev -- judge --test-case-uuid <uuid> --environment <name>
