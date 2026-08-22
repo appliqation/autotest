@@ -23,7 +23,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@appliqation/agent-core": "^0.1.2",
+    "@appliqation/agent-core": "^0.1.3",
     "@appliqation/automation-sdk": "^2.7.0",
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",
