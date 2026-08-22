@@ -95,7 +95,7 @@ export async function judgeTc(opts: JudgeTcOptions): Promise<JudgeTcResult> {
       extraHTTPHeaders: apiAuthHeader ? { [apiAuthHeader.name]: apiAuthHeader.value } : undefined,
     });
     try {
-      const apiTools = new ApiRequestTools(apiContext, dryRun);
+      const apiTools = new ApiRequestTools(apiContext, dryRun, url);
       const apiDispatch: ToolDispatcher = async (name, args) => {
         if (name === 'http_request') return apiTools.dispatch(name, args);
         return gatedExecutorAppq(name, args);
