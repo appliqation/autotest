@@ -60,6 +60,18 @@ appliqation-autotest judge --test-set-id <id> --environment Stage --dry-run
 
 Copy `.env.example` to `.env`. Requires `APPQ_API_KEY` and one of `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`. Separate executor/validator model overrides are supported — a cheaper model for judging captured evidence is a reasonable choice even when the executor needs a stronger one for open-ended browsing.
 
+## Running this safely
+
+The executor drives a real browser turn by turn on the model's own decisions — where to navigate, what to click, what to inspect — against whatever page content the site under test happens to serve. The destructive-action gate on `browser_click`/`browser_evaluate` (see `@appliqation/agent-core`'s `destructiveActionGate.ts`) blocks the obvious failure mode, but it's a code-level backstop, not a substitute for containment: this process holds `APPQ_API_KEY`, your LLM provider key, and (for authenticated runs) real project credentials, all reachable from wherever the model decides to navigate.
+
+**Run this inside a container with an egress allowlist**, not directly on a machine with broad network access. This process only ever legitimately needs to reach:
+
+- your LLM provider (`api.anthropic.com` or `api.openai.com`)
+- your configured `APPQ_ORIGIN` (`appq.appliqation.io` by default)
+- the project's own site under test — whatever URL `--environment` resolves to via `get_project_settings`
+
+Anything else this process tries to reach is unexpected and worth investigating, not routing around.
+
 ## Development
 
 ```bash
