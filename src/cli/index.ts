@@ -13,9 +13,6 @@ import {
   createAnthropicAdapter,
   createOpenAiAdapter,
   createUsageAccumulator,
-  fetchAppqToolDefs,
-  createGatedAppqDispatcher,
-  runWorkflow,
   resolveStorageState,
   resolveApiAuth,
   knownRolesForProject,
@@ -29,10 +26,8 @@ import {
   resolveUrl,
   type LoopResult,
   type ProviderAdapter,
-  type ToolDispatcher,
 } from '@appliqation/agent-core';
 import { config, resolveProvider, resolveModel } from '../config/env.js';
-import { READONLY_APPQ_TOOLS } from '../tools/safety.js';
 import { judgeTc } from '../orchestrator/judgeTc.js';
 import { parseCoveragePolicy, shouldRunAgenticCoverage } from '../orchestrator/coveragePolicy.js';
 import { pollTestResults } from '../orchestrator/pollResults.js';
