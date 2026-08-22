@@ -3,9 +3,14 @@
   "version": "0.1.1",
   "description": "Standalone autonomous testing agent that executes Appliqation MCP workflows against a live app under test.",
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/appliqation/autotest.git" },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/appliqation/autotest.git"
+  },
   "homepage": "https://github.com/appliqation/autotest#readme",
-  "bugs": { "url": "https://github.com/appliqation/autotest/issues" },
+  "bugs": {
+    "url": "https://github.com/appliqation/autotest/issues"
+  },
   "type": "module",
   "bin": {
     "appliqation-autotest": "./dist/cli/index.js"
@@ -27,7 +32,7 @@
     "test:watch": "vitest"
   },
   "dependencies": {
-    "@appliqation/agent-core": "^0.1.4",
+    "@appliqation/agent-core": "^0.1.5",
     "@appliqation/automation-sdk": "^2.7.0",
     "commander": "^13.1.0",
     "dotenv": "^16.4.7",

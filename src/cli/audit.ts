@@ -7,7 +7,7 @@
 // No turns/budgetExceeded at the top level: those are per-TC internals of
 // judgeTc()'s executor/validator pair, not something RunSummary aggregates.
 
-import { safeRecord, type AuditSink, type AuditRecord } from '@appliqation/agent-core';
+import { safeRecord, safeClose, type AuditSink, type AuditRecord } from '@appliqation/agent-core';
 import type { RunSummary } from './output.js';
 
 export interface RecordJudgeRunArgs {
@@ -35,4 +35,5 @@ export async function recordJudgeRun(args: RecordJudgeRunArgs): Promise<void> {
     exitCode,
     outcome: summary ? { ...summary } : { results: [], note: 'no test cases found' },
   });
+  await safeClose(sink);
 }
