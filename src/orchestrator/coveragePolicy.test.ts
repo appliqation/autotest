@@ -10,6 +10,10 @@ describe('parseCoveragePolicy', () => {
     expect(parseCoveragePolicy('on-script-absence')).toEqual({ kind: 'on-script-absence' });
   });
 
+  it('parses on-failure-or-absence', () => {
+    expect(parseCoveragePolicy('on-failure-or-absence')).toEqual({ kind: 'on-failure-or-absence' });
+  });
+
   it('parses external', () => {
     expect(parseCoveragePolicy('external')).toEqual({ kind: 'external' });
   });
@@ -40,6 +44,45 @@ describe('shouldRunAgenticCoverage', () => {
   it('on-script-absence: runs only when no canonical script exists', () => {
     expect(shouldRunAgenticCoverage({ kind: 'on-script-absence' }, { tcIndex: 0, hasCanonicalScript: false })).toBe(true);
     expect(shouldRunAgenticCoverage({ kind: 'on-script-absence' }, { tcIndex: 0, hasCanonicalScript: true })).toBe(false);
+  });
+
+  it('on-script-absence: ignores canonicalScriptPassed entirely — a failed canonical still skips', () => {
+    expect(
+      shouldRunAgenticCoverage(
+        { kind: 'on-script-absence' },
+        { tcIndex: 0, hasCanonicalScript: true, canonicalScriptPassed: false },
+      ),
+    ).toBe(false);
+  });
+
+  it('on-failure-or-absence: runs when no canonical script exists', () => {
+    expect(
+      shouldRunAgenticCoverage({ kind: 'on-failure-or-absence' }, { tcIndex: 0, hasCanonicalScript: false }),
+    ).toBe(true);
+  });
+
+  it('on-failure-or-absence: runs when a canonical script exists but just failed', () => {
+    expect(
+      shouldRunAgenticCoverage(
+        { kind: 'on-failure-or-absence' },
+        { tcIndex: 0, hasCanonicalScript: true, canonicalScriptPassed: false },
+      ),
+    ).toBe(true);
+  });
+
+  it('on-failure-or-absence: skips when a canonical script exists and passed', () => {
+    expect(
+      shouldRunAgenticCoverage(
+        { kind: 'on-failure-or-absence' },
+        { tcIndex: 0, hasCanonicalScript: true, canonicalScriptPassed: true },
+      ),
+    ).toBe(false);
+  });
+
+  it('on-failure-or-absence: skips when a canonical script exists and its result is unknown (never conflate unknown with failed)', () => {
+    expect(
+      shouldRunAgenticCoverage({ kind: 'on-failure-or-absence' }, { tcIndex: 0, hasCanonicalScript: true }),
+    ).toBe(false);
   });
 
   it('sampled: runs on every Nth index (0-based)', () => {

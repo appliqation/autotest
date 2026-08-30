@@ -272,11 +272,21 @@ the identical executor→evidence→validator→verdict flow as before the migra
 - `src/orchestrator/` — `judgeTc.ts` (the executor→validator pair for one TC, factored out
   so `judge`'s two modes share exactly one implementation; takes an `McpClient` as an
   explicit param now, not a module-level import), `coveragePolicy.ts` (`always` /
-  `on-script-absence` / `sampled:N` / `external` — never hardcoded, see the plan's
-  "coverage decision"; `external` throws if selected without a decider function wired up —
-  a deliberate hook for a future orchestrating agent, not a silent fallback),
-  `pollResults.ts` (poll-until-settled against `get_test_results`, since the deterministic
-  path is SQS-driven with no blocking/webhook API — also takes an `McpClient` param now).
+  `on-script-absence` / `on-failure-or-absence` / `sampled:N` / `external` — never
+  hardcoded, see the plan's "coverage decision"; `external` throws if selected without a
+  decider function wired up — a deliberate hook for a future orchestrating agent, not a
+  silent fallback). `on-failure-or-absence` escalates a TC whose canonical script exists
+  but just failed, not only ones with no script at all — `on-script-absence` (the default)
+  silently trusts a possibly-stale script forever, since a TC with *any* canonical never
+  gets agentically re-checked regardless of that script's own result. Needs
+  `CoverageDecisionInput.canonicalScriptPassed` (from `get_automation_readiness`'s
+  `last_result` field, appq-side — see that tool's own docblock), `undefined` when no run
+  has ever happened yet, never conflated with an actual failure. The validator's own
+  reconciliation logic (`AutotestValidatorPrompt.php`, "canonical vs agentic evidence
+  disagree = the finding") already exists and needs no change — this just triggers it
+  more often. `pollResults.ts` (poll-until-settled against `get_test_results`, since the
+  deterministic path is SQS-driven with no blocking/webhook API — also takes an
+  `McpClient` param now).
 - `src/tools/safety.ts` — **the one hardcoded, non-negotiable invariant that's local to
   this app**: which appq tools the executor/validator stages may each touch
   (`READONLY_APPQ_TOOLS`, `EXECUTOR_WRITE_TOOL`, `VALIDATOR_ONLY_APPQ_TOOLS`,

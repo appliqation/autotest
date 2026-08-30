@@ -154,8 +154,11 @@ program
   )
   .option(
     '--coverage <policy>',
-    'always | on-script-absence | sampled:N | external — only meaningful in whole-scenario mode; see the plan ' +
-      'doc\'s "coverage decision" for why this is never hardcoded. Defaults to on-script-absence.',
+    'always | on-script-absence | on-failure-or-absence | sampled:N | external — only meaningful in whole-scenario ' +
+      'mode; see the plan doc\'s "coverage decision" for why this is never hardcoded. on-failure-or-absence also ' +
+      "escalates a TC whose canonical script exists but just failed (on-script-absence skips it entirely, silently " +
+      'trusting a possibly-stale script) — defaults stay on-script-absence since escalating failures is a real ' +
+      'cost increase, opt in explicitly.',
     'on-script-absence',
   )
   .option(
@@ -245,7 +248,7 @@ program
         );
 
         const runIdByScenario = new Map<number, string>();
-        const canonicalByUuid = new Map<string, boolean>();
+        const readinessByUuid = new Map<string, { hasCanonicalScript: boolean; canonicalScriptPassed?: boolean }>();
         for (const scenarioIdForGroup of byScenario.keys()) {
           const readinessResult = await client.callTool('get_automation_readiness', {
             scenario_id: scenarioIdForGroup,
@@ -254,10 +257,17 @@ program
           if (readinessResult.ok) {
             const readiness = (
               JSON.parse(readinessResult.text) as {
-                readiness: Array<{ test_case_uuid: string; has_canonical_script: boolean }>;
+                readiness: Array<{ test_case_uuid: string; has_canonical_script: boolean; last_result?: string | null }>;
               }
             ).readiness;
-            for (const r of readiness) canonicalByUuid.set(r.test_case_uuid, r.has_canonical_script);
+            for (const r of readiness) {
+              readinessByUuid.set(r.test_case_uuid, {
+                hasCanonicalScript: r.has_canonical_script,
+                // undefined (not false) when there's no result yet — 'unknown'
+                // must never read as 'failed' to the coverage decision.
+                canonicalScriptPassed: r.last_result == null ? undefined : r.last_result === 'pass',
+              });
+            }
           } else {
             console.error(`[setup] get_automation_readiness failed for scenario ${scenarioIdForGroup}: ${readinessResult.text}`);
           }
@@ -274,8 +284,12 @@ program
         const skipped: typeof tcs = [];
         for (const scenarioTcs of byScenario.values()) {
           scenarioTcs.forEach((tc, i) => {
-            const hasCanonical = canonicalByUuid.get(tc.testCaseUuid) ?? false;
-            const runAgentic = shouldRunAgenticCoverage(policy, { tcIndex: i, hasCanonicalScript: hasCanonical });
+            const readiness = readinessByUuid.get(tc.testCaseUuid) ?? { hasCanonicalScript: false };
+            const runAgentic = shouldRunAgenticCoverage(policy, {
+              tcIndex: i,
+              hasCanonicalScript: readiness.hasCanonicalScript,
+              canonicalScriptPassed: readiness.canonicalScriptPassed,
+            });
             (runAgentic ? covered : skipped).push(tc);
           });
         }
@@ -342,7 +356,7 @@ program
 
         const outcomes: TcOutcome[] = tcs.map((tc) => {
           const scenarioIdForTc = scenarioIdFromTcUuid(tc.testCaseUuid);
-          const hasCanonical = canonicalByUuid.get(tc.testCaseUuid) ?? false;
+          const hasCanonical = readinessByUuid.get(tc.testCaseUuid)?.hasCanonicalScript ?? false;
           const isCovered = covered.some((c) => c.testCaseUuid === tc.testCaseUuid);
           const path: TcOutcome['path'] = isCovered ? (hasCanonical ? 'canonical script + agentic' : 'agentic') : 'canonical script';
           const result = resultsByUuid.get(tc.testCaseUuid);
@@ -462,7 +476,7 @@ program
       if (!readinessResult.ok) throw new Error(`get_automation_readiness failed: ${readinessResult.text}`);
       const readiness = (
         JSON.parse(readinessResult.text) as {
-          readiness: Array<{ test_case_uuid: string; has_canonical_script: boolean }>;
+          readiness: Array<{ test_case_uuid: string; has_canonical_script: boolean; last_result?: string | null }>;
         }
       ).readiness;
 
@@ -475,7 +489,11 @@ program
       const skipped: string[] = [];
       for (let i = 0; i < readiness.length; i++) {
         const tc = readiness[i];
-        const runAgentic = shouldRunAgenticCoverage(policy, { tcIndex: i, hasCanonicalScript: tc.has_canonical_script });
+        const runAgentic = shouldRunAgenticCoverage(policy, {
+          tcIndex: i,
+          hasCanonicalScript: tc.has_canonical_script,
+          canonicalScriptPassed: tc.last_result == null ? undefined : tc.last_result === 'pass',
+        });
         (runAgentic ? covered : skipped).push(tc.test_case_uuid);
       }
       console.error(

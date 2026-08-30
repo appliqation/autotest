@@ -14,12 +14,14 @@
 export type CoveragePolicy =
   | { kind: 'always' }
   | { kind: 'on-script-absence' }
+  | { kind: 'on-failure-or-absence' }
   | { kind: 'sampled'; n: number }
   | { kind: 'external' };
 
 export function parseCoveragePolicy(raw: string): CoveragePolicy {
   if (raw === 'always') return { kind: 'always' };
   if (raw === 'on-script-absence') return { kind: 'on-script-absence' };
+  if (raw === 'on-failure-or-absence') return { kind: 'on-failure-or-absence' };
   if (raw === 'external') return { kind: 'external' };
   const sampledMatch = /^sampled:(\d+)$/.exec(raw);
   if (sampledMatch) {
@@ -27,12 +29,21 @@ export function parseCoveragePolicy(raw: string): CoveragePolicy {
     if (n < 1) throw new Error(`Invalid coverage policy "${raw}": sampled:N requires N >= 1`);
     return { kind: 'sampled', n };
   }
-  throw new Error(`Invalid coverage policy "${raw}". Expected: always | on-script-absence | sampled:N | external`);
+  throw new Error(
+    `Invalid coverage policy "${raw}". Expected: always | on-script-absence | on-failure-or-absence | sampled:N | external`,
+  );
 }
 
 export interface CoverageDecisionInput {
   tcIndex: number;
   hasCanonicalScript: boolean;
+  /**
+   * The canonical script's most recent pass/fail result, when known. Absent
+   * (undefined) when there's no canonical script at all, or its last result
+   * wasn't looked up (policies other than 'on-failure-or-absence' never need
+   * it). Only 'on-failure-or-absence' reads this field.
+   */
+  canonicalScriptPassed?: boolean;
 }
 
 /**
@@ -58,6 +69,8 @@ export function shouldRunAgenticCoverage(
       return true;
     case 'on-script-absence':
       return !input.hasCanonicalScript;
+    case 'on-failure-or-absence':
+      return !input.hasCanonicalScript || input.canonicalScriptPassed === false;
     case 'sampled':
       return input.tcIndex % policy.n === 0;
     case 'external':
