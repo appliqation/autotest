@@ -1,6 +1,6 @@
 {
   "name": "@appliqation/autotest",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Standalone autonomous testing agent that executes Appliqation MCP workflows against a live app under test.",
   "license": "MIT",
   "repository": {
