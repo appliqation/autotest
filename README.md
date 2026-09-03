@@ -50,9 +50,14 @@ ANTHROPIC_API_KEY=your-anthropic-key   # or OPENAI_API_KEY — pick one
 # one test case
 appliqation-autotest judge --test-case-uuid <uuid> --environment Stage --dry-run
 
-# a whole test set (regression / sanity / smoke — the common CI shape)
+# an entire scenario
+appliqation-autotest judge --scenario-id <id> --environment Stage --dry-run
+
+# a whole test set (regression / sanity / smoke — the common CI shape; can span multiple scenarios)
 appliqation-autotest judge --test-set-id <id> --environment Stage --dry-run
 ```
+
+Exactly one of `--test-case-uuid` / `--scenario-id` / `--test-set-id` is required — mutually exclusive scopes, not combinable.
 
 `--dry-run` is the recommended default for your first run against a real project — it computes real verdicts but suppresses the actual Appliqation writeback. Drop it once you trust the result. `--coverage` (`always` / `on-script-absence` / `sampled:N` / `external`) controls when this agentic pass runs alongside your existing deterministic Playwright pipeline in scenario/test-set mode; `--json`/`--ci` give a structured summary and a CI-friendly exit code.
 
