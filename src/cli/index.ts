@@ -12,6 +12,7 @@ import {
   createMcpClient,
   createAnthropicAdapter,
   createOpenAiAdapter,
+  createOpenAiCompatibleAdapter,
   createUsageAccumulator,
   resolveStorageState,
   resolveApiAuth,
@@ -41,9 +42,12 @@ const client = createMcpClient({ origin: config.appqOrigin, apiKey: config.appqA
 function buildAdapter(role: 'executor' | 'validator'): ProviderAdapter {
   const provider = resolveProvider();
   const model = resolveModel(role);
-  return provider === 'anthropic'
-    ? createAnthropicAdapter(config.anthropicApiKey!, model, config.anthropicMaxTokens)
-    : createOpenAiAdapter(config.openaiApiKey!, model, config.openaiMaxOutputTokens);
+  if (provider === 'anthropic') return createAnthropicAdapter(config.anthropicApiKey!, model, config.anthropicMaxTokens);
+  if (provider === 'openai') return createOpenAiAdapter(config.openaiApiKey!, model, config.openaiMaxOutputTokens);
+  if (provider === 'deepseek') {
+    return createOpenAiCompatibleAdapter({ apiKey: config.deepseekApiKey!, baseURL: config.deepseekBaseUrl, model, maxTokens: config.deepseekMaxTokens, providerLabel: 'DeepSeek' });
+  }
+  return createOpenAiCompatibleAdapter({ apiKey: config.glmApiKey!, baseURL: config.glmBaseUrl, model, maxTokens: config.glmMaxTokens, providerLabel: 'GLM' });
 }
 
 function logEvent(prefix: string, onUsage?: (u: { inputTokens: number; outputTokens: number; cacheWriteTokens?: number; cacheReadTokens?: number }) => void) {
