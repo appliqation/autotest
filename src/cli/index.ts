@@ -216,12 +216,15 @@ program
         if (opts.testSetId) {
         // Test-set mode: a test set can span multiple scenarios (appq's own
         // get_test_set describes it as "a collection of test cases from
-        // different scenarios"), but create_run/update_run_results is
-        // inherently scenario-scoped — so this groups TCs by their own
-        // UUID-derived scenario_id and resolves one run + one
-        // get_automation_readiness check per distinct scenario, not one
-        // overall. --run-id reuse is deliberately not supported here (see
-        // the option's own help text) — there's no single run to reuse.
+        // different scenarios"), but create_run/update_run_results now
+        // accepts test_set_id directly (the same mechanism the "Run Test
+        // Set" UI flow already used internally) — so this creates exactly
+        // ONE run covering every TC across every scenario the test set
+        // spans, not one per scenario. get_automation_readiness is still
+        // called once per distinct scenario (canonical-script existence is
+        // TC/project scoped, not run-scoped, so this is unaffected).
+        // --run-id reuse is deliberately not supported here (see the
+        // option's own help text) — a test set always gets a fresh run.
         const testSetId = Number(opts.testSetId);
         const { projectId, tcs } = await fetchTestSetInfo(client, testSetId);
         const url = await resolveUrl(client, opts.environment, projectId);
@@ -247,7 +250,12 @@ program
           `[setup] test set: ${tcs.length} test cases across ${byScenario.size} scenario(s), coverage: ${opts.coverage}`,
         );
 
-        const runIdByScenario = new Map<number, string>();
+        const runId = await resolveRun(client, {
+          testSetId: String(testSetId),
+          projectId: String(projectId),
+          environment: opts.environment,
+        });
+
         const readinessByUuid = new Map<string, { hasCanonicalScript: boolean; canonicalScriptPassed?: boolean }>();
         for (const scenarioIdForGroup of byScenario.keys()) {
           const readinessResult = await client.callTool('get_automation_readiness', {
@@ -271,12 +279,6 @@ program
           } else {
             console.error(`[setup] get_automation_readiness failed for scenario ${scenarioIdForGroup}: ${readinessResult.text}`);
           }
-          const runId = await resolveRun(client, {
-            scenarioId: String(scenarioIdForGroup),
-            projectId: String(projectId),
-            environment: opts.environment,
-          });
-          runIdByScenario.set(scenarioIdForGroup, runId);
         }
         console.error(`[setup] image check: ${mandatoryImageCheck ? 'mandatory' : 'on-demand'}, dry-run: ${dryRun}`);
 
@@ -298,7 +300,6 @@ program
         const inferredStorageStateCache = new Map<string, ReturnType<typeof resolveStorageState>>();
         for (const tc of covered) {
           const scenarioIdForTc = scenarioIdFromTcUuid(tc.testCaseUuid);
-          const runId = runIdByScenario.get(scenarioIdForTc)!;
           console.error(`\n--- judging ${tc.testCaseUuid} (scenario ${scenarioIdForTc}) ---`);
           try {
             const testType = explicitTestType ?? (isApiTest(tc) ? 'api' : 'ui');
@@ -338,21 +339,15 @@ program
           }
         }
 
-        console.error(`\n[report] polling get_test_results for ${byScenario.size} run(s) (up to ${pollTimeoutMs}ms each)...`);
-        const resultsByUuid = new Map<string, { status: string | null; errorMessage?: string }>();
-        if (!dryRun) {
-          for (const [scenarioIdForGroup, scenarioTcs] of byScenario) {
-            const runId = runIdByScenario.get(scenarioIdForGroup)!;
-            const polled = await pollTestResults(client, {
+        console.error(`\n[report] polling get_test_results for 1 run (up to ${pollTimeoutMs}ms)...`);
+        const resultsByUuid = dryRun
+          ? new Map<string, { status: string | null; errorMessage?: string }>()
+          : await pollTestResults(client, {
               runId,
-              scenarioId: scenarioIdForGroup,
-              wantUuids: new Set(scenarioTcs.map((t) => t.testCaseUuid)),
+              wantUuids: new Set(tcs.map((t) => t.testCaseUuid)),
               timeoutMs: pollTimeoutMs,
               intervalMs: config.pollIntervalMs,
             });
-            for (const [uuid, result] of polled) resultsByUuid.set(uuid, result);
-          }
-        }
 
         const outcomes: TcOutcome[] = tcs.map((tc) => {
           const scenarioIdForTc = scenarioIdFromTcUuid(tc.testCaseUuid);
@@ -366,18 +361,17 @@ program
             path,
             status,
             errorMessage: result?.errorMessage,
-            runId: runIdByScenario.get(scenarioIdForTc),
             scenarioId: scenarioIdForTc,
           };
         });
 
-        summary = { testSetId, dryRun, results: outcomes };
+        summary = { runId, testSetId, dryRun, results: outcomes };
         if (json) printJsonSummary(summary);
         else printHumanSummary(summary);
 
         const pending = outcomes.filter((o) => o.status === 'pending').length;
         if (!dryRun && pending > 0 && !json) {
-          console.error(`\n${pending} test case(s) hadn't settled by the poll timeout — check the runs directly for the final state.`);
+          console.error(`\n${pending} test case(s) hadn't settled by the poll timeout — check the run directly for the final state.`);
         }
 
         process.exitCode = exitCodeFor(summary);

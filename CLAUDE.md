@@ -135,26 +135,33 @@ genuinely different mechanism. `judge --test-case-uuid <uuid>` is single-TC mode
 
 **Test-set mode (`judge --test-set-id <id>`):** the most common CI shape — a regression/
 sanity/smoke suite is a test set, not a single scenario. appq's own `get_test_set`
-describes a test set as spanning multiple scenarios, but `create_run`/
-`update_run_results` is inherently scenario-scoped, so this mode groups the test set's
-TCs by their own UUID-derived `scenario_id` (`scenarioIdFromTcUuid()`, the same source of
-truth used everywhere else in this codebase — never a second parsed field that could
-disagree with it) and resolves one run + one `get_automation_readiness` check per
-distinct scenario represented, not one overall. Coverage policy, role inference, and
-poll-then-report all apply per TC exactly as in whole-scenario mode; the final report is
-one consolidated summary across every scenario, with each `TcOutcome` carrying its own
-`runId`/`scenarioId` since there's no single one to report at the top level (see
-`RunSummary`/`TcOutcome` in `src/cli/output.ts`). `--run-id` reuse is deliberately not
-supported in this mode — there's no single run to reuse across possibly-many scenarios.
+describes a test set as spanning multiple scenarios; `create_run`/`update_run_results`
+now accepts `test_set_id` directly (the same mechanism the "Run Test Set" UI flow
+already used internally — `AutomationResultManager::createRun()`'s `$testset_id`
+parameter, previously never exposed through the MCP tool), so this mode creates exactly
+**one** run covering every TC across every scenario the test set spans, via
+`resolveRun(client, {testSetId, projectId, environment})`. `get_automation_readiness`
+is still called once per distinct scenario (`scenarioIdFromTcUuid()`-grouped, same source
+of truth used everywhere else in this codebase) — canonical-script existence is
+TC/project scoped, not run-scoped, so per-scenario readiness checks are unaffected by
+the run-count fix. Coverage policy, role inference, and poll-then-report all apply per TC
+exactly as in whole-scenario mode; the final report is one consolidated summary with a
+single top-level `runId` (see `RunSummary` in `src/cli/output.ts` — `TcOutcome` keeps only
+`scenarioId` per TC now, for display/attribution, not a per-TC `runId`). `--run-id` reuse
+is still not supported in this mode — a test set always gets a fresh run.
 `fetchTestSetInfo()` (in `@appliqation/agent-core`'s `scenarioResolvers.ts`) is the
 `get_test_set` counterpart to `fetchScenarioInfo()` — note its MCP param is
 `testset_id`, not `test_set_id` (a real trap hit during implementation: the tool's actual
-`inputSchema`, confirmed via `tools/list`, differs from the CLI flag's own naming).
-Verified live (`--dry-run --json`) against the real "DailyPulse — Smoke" test set
-(test_set_id 1358, 8 TCs spanning 8 distinct scenarios): correctly created 8 separate
-per-scenario runs, applied `on-script-absence` coverage (1 TC with no canonical script
-got real agentic judging, the other 7 were left deterministic-only), and produced one
-consolidated JSON summary with each TC's own `runId`/`scenarioId` populated correctly.
+`inputSchema`, confirmed via `tools/list`, differs from the CLI flag's own naming;
+`create_run`'s own schema uses `test_set_id` — the two tools don't even agree with each
+other on the field name, so don't assume one from the other).
+Was previously verified live creating 8 separate per-scenario runs for the real
+"DailyPulse — Smoke" test set (test_set_id 1358, 8 TCs across 8 distinct scenarios) —
+that behavior is exactly what this fix replaces with a single shared run. Pending: live
+re-verification against Stage confirming exactly one run_id now, with
+`CrossBrowserScheduler`'s deterministic fan-out (already testset-aware server-side, per
+`AutomationResultManager::getRunPlan()`) correctly executing canonical scripts across
+all 8 scenarios under that one run.
 
 `--project-id` and `--url` are **not CLI options at all** — always derived, never
 accepted as separate caller-supplied inputs (`fetchScenarioInfo`/`resolveUrl` in
@@ -418,8 +425,8 @@ be reused by every sibling agent, not just this one:
   `--project-id`/`--url` are still not options — always derived from `--scenario-id`.
 - `npx tsx src/cli/index.ts judge --test-set-id <id> --environment <name> [--coverage <policy>] [--dry-run] [--json|--ci]`
   — every TC in a test set (regression/sanity/smoke — the common CI case), which can span
-  multiple scenarios; one run per distinct scenario represented, consolidated report
-  across all of them. `--run-id` is not supported in this mode.
+  multiple scenarios; one single run for the whole test set, consolidated report across
+  all of them. `--run-id` is not supported in this mode.
 - Add `--role <name>` to either form to force one role for every TC — see
   `@appliqation/agent-core`'s `tools/authState.ts` above. Omit it and per-TC role
   auto-detection kicks in instead (see its `tools/roleInference.ts`) — each TC's own
