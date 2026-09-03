@@ -63,12 +63,12 @@ describe('printHumanSummary', () => {
     expect(output).not.toContain('scenario');
   });
 
-  it('uses a "Test set N" header (no single run/scenario to report) when testSetId is present, taking priority over runId/scenarioId', () => {
+  it('includes both the run id and the test set id in the header when testSetId is present — one shared run covers the whole test set', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
-    printHumanSummary({ testSetId: 1358, dryRun: false, results: [] });
+    printHumanSummary({ runId: 'run_testset', testSetId: 1358, dryRun: false, results: [] });
     const output = logSpy.mock.calls.map((c) => c[0]).join('\n');
-    expect(output).toContain('Test set 1358');
-    expect(output).not.toContain('Run');
+    expect(output).toContain('Run run_testset');
+    expect(output).toContain('test set 1358');
   });
 
   it('prints each result row with its path and status', () => {

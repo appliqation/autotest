@@ -11,20 +11,21 @@ export interface TcOutcome {
   errorMessage?: string;
   /**
    * Present only in test-set mode, where different TCs can belong to
-   * different scenarios (and therefore different runs — appq's run/
-   * create_run concept is scenario-scoped, a test set is not). Single-TC
-   * and whole-scenario mode share one run for every result, carried at the
-   * top level instead — these stay undefined there.
+   * different scenarios — kept here purely for per-TC attribution/display.
+   * Every mode (single-TC, whole-scenario, test-set) now shares exactly one
+   * run for every result in the invocation, carried once at RunSummary's
+   * top level — appq's create_run accepts test_set_id directly (same
+   * mechanism the "Run Test Set" UI flow uses), so a test set no longer
+   * needs one run per scenario it spans.
    */
-  runId?: string;
   scenarioId?: number;
 }
 
 export interface RunSummary {
-  /** Single-TC / whole-scenario mode only — one run for every result. Omitted in test-set mode; see each TcOutcome's own runId/scenarioId instead. */
+  /** One run for every result in this invocation, regardless of mode. */
   runId?: string;
   scenarioId?: number;
-  /** Test-set mode only — a test set can span multiple scenarios/runs. */
+  /** Test-set mode only — a test set can span multiple scenarios, all under this one run. */
   testSetId?: number;
   dryRun: boolean;
   results: TcOutcome[];
@@ -42,7 +43,7 @@ export function printJsonSummary(summary: RunSummary): void {
 
 export function printHumanSummary(summary: RunSummary): void {
   const header = summary.testSetId
-    ? `Test set ${summary.testSetId}`
+    ? `Run ${summary.runId} — test set ${summary.testSetId}`
     : summary.scenarioId
       ? `Run ${summary.runId} — scenario ${summary.scenarioId}`
       : `Run ${summary.runId}`;
