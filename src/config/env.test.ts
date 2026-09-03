@@ -9,12 +9,20 @@ vi.mock('dotenv/config', () => ({}));
 const ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'OPENAI_API_KEY',
+  'DEEPSEEK_API_KEY',
+  'GLM_API_KEY',
   'ANTHROPIC_MODEL',
   'ANTHROPIC_EXECUTOR_MODEL',
   'ANTHROPIC_VALIDATOR_MODEL',
   'OPENAI_MODEL',
   'OPENAI_EXECUTOR_MODEL',
   'OPENAI_VALIDATOR_MODEL',
+  'DEEPSEEK_MODEL',
+  'DEEPSEEK_EXECUTOR_MODEL',
+  'DEEPSEEK_VALIDATOR_MODEL',
+  'GLM_MODEL',
+  'GLM_EXECUTOR_MODEL',
+  'GLM_VALIDATOR_MODEL',
   'APPQ_ORIGIN',
   'APPQ_API_KEY',
 ];
@@ -42,22 +50,37 @@ async function freshEnv() {
 }
 
 describe('resolveProvider', () => {
-  it('prefers anthropic when both API keys are set', async () => {
+  it('prefers anthropic when multiple API keys are set', async () => {
     process.env.ANTHROPIC_API_KEY = 'a';
     process.env.OPENAI_API_KEY = 'b';
+    process.env.DEEPSEEK_API_KEY = 'c';
+    process.env.GLM_API_KEY = 'd';
     const { resolveProvider } = await freshEnv();
     expect(resolveProvider()).toBe('anthropic');
   });
 
-  it('falls back to openai when only its key is set', async () => {
+  it('falls back to openai when anthropic is not set', async () => {
     process.env.OPENAI_API_KEY = 'b';
+    process.env.DEEPSEEK_API_KEY = 'c';
     const { resolveProvider } = await freshEnv();
     expect(resolveProvider()).toBe('openai');
   });
 
-  it('throws when neither provider is configured', async () => {
+  it('falls back to deepseek when only its key is set', async () => {
+    process.env.DEEPSEEK_API_KEY = 'c';
     const { resolveProvider } = await freshEnv();
-    expect(() => resolveProvider()).toThrow(/ANTHROPIC_API_KEY or OPENAI_API_KEY/);
+    expect(resolveProvider()).toBe('deepseek');
+  });
+
+  it('falls back to glm when only its key is set', async () => {
+    process.env.GLM_API_KEY = 'd';
+    const { resolveProvider } = await freshEnv();
+    expect(resolveProvider()).toBe('glm');
+  });
+
+  it('throws when no provider is configured', async () => {
+    const { resolveProvider } = await freshEnv();
+    expect(() => resolveProvider()).toThrow(/ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, or GLM_API_KEY/);
   });
 });
 
@@ -115,6 +138,46 @@ describe('resolveModel — precedence: role override > blanket override > provid
     process.env.ANTHROPIC_EXECUTOR_MODEL = 'claude-sonnet-5'; // irrelevant — provider is openai
     const { resolveModel } = await freshEnv();
     expect(resolveModel('executor')).toBe(DEFAULT_OPENAI_MODEL);
+  });
+
+  it('deepseek: has no default — throws a clear, actionable error for both roles when DEEPSEEK_MODEL is unset', async () => {
+    process.env.DEEPSEEK_API_KEY = 'c';
+    const { resolveModel } = await freshEnv();
+    expect(() => resolveModel('executor')).toThrow(/DEEPSEEK_MODEL/);
+    expect(() => resolveModel('validator')).toThrow(/DEEPSEEK_MODEL/);
+  });
+
+  it('deepseek: a blanket DEEPSEEK_MODEL override applies to both roles', async () => {
+    process.env.DEEPSEEK_API_KEY = 'c';
+    process.env.DEEPSEEK_MODEL = 'deepseek-chat';
+    const { resolveModel } = await freshEnv();
+    expect(resolveModel('executor')).toBe('deepseek-chat');
+    expect(resolveModel('validator')).toBe('deepseek-chat');
+  });
+
+  it('deepseek: a role-specific override wins over the blanket override', async () => {
+    process.env.DEEPSEEK_API_KEY = 'c';
+    process.env.DEEPSEEK_MODEL = 'deepseek-chat';
+    process.env.DEEPSEEK_VALIDATOR_MODEL = 'deepseek-reasoner';
+    const { resolveModel } = await freshEnv();
+    expect(resolveModel('executor')).toBe('deepseek-chat');
+    expect(resolveModel('validator')).toBe('deepseek-reasoner');
+  });
+
+  it('glm: has no default — throws a clear, actionable error for both roles when GLM_MODEL is unset', async () => {
+    process.env.GLM_API_KEY = 'd';
+    const { resolveModel } = await freshEnv();
+    expect(() => resolveModel('executor')).toThrow(/GLM_MODEL/);
+    expect(() => resolveModel('validator')).toThrow(/GLM_MODEL/);
+  });
+
+  it('glm: role override wins over blanket override, same precedence as the other providers', async () => {
+    process.env.GLM_API_KEY = 'd';
+    process.env.GLM_MODEL = 'glm-4.6';
+    process.env.GLM_EXECUTOR_MODEL = 'glm-4.6v';
+    const { resolveModel } = await freshEnv();
+    expect(resolveModel('executor')).toBe('glm-4.6v');
+    expect(resolveModel('validator')).toBe('glm-4.6');
   });
 });
 

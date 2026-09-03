@@ -8,6 +8,10 @@ export const config = {
   appqApiKey: () => required('APPQ_API_KEY'),
   anthropicApiKey: optional('ANTHROPIC_API_KEY'),
   openaiApiKey: optional('OPENAI_API_KEY'),
+  deepseekApiKey: optional('DEEPSEEK_API_KEY'),
+  glmApiKey: optional('GLM_API_KEY'),
+  deepseekBaseUrl: optional('DEEPSEEK_BASE_URL') ?? 'https://api.deepseek.com',
+  glmBaseUrl: optional('GLM_BASE_URL') ?? 'https://open.bigmodel.cn/api/paas/v4',
   // Default for the validator's image-viewing mode. Deliberately a
   // deployment-level setting (env var here, overridable per-run via
   // --mandatory-image-check), not something the workflow prompt decides —
@@ -31,6 +35,8 @@ export const config = {
   // one setting just because they're conceptually similar.
   anthropicMaxTokens: Number(optional('ANTHROPIC_MAX_TOKENS') ?? 4096),
   openaiMaxOutputTokens: Number(optional('OPENAI_MAX_OUTPUT_TOKENS') ?? 4096),
+  deepseekMaxTokens: Number(optional('DEEPSEEK_MAX_TOKENS') ?? 4096),
+  glmMaxTokens: Number(optional('GLM_MAX_TOKENS') ?? 4096),
   evidenceRingBufferCap: Number(optional('EVIDENCE_RING_BUFFER_CAP') ?? 500),
   pollIntervalMs: Number(optional('POLL_INTERVAL_MS') ?? 5000),
   pollTimeoutMs: Number(optional('POLL_TIMEOUT_MS') ?? 120000),
@@ -44,10 +50,16 @@ export const config = {
   }),
 };
 
-export function resolveProvider(): 'anthropic' | 'openai' {
+export function resolveProvider(): 'anthropic' | 'openai' | 'deepseek' | 'glm' {
   if (config.anthropicApiKey) return 'anthropic';
   if (config.openaiApiKey) return 'openai';
-  throw new Error('Set ANTHROPIC_API_KEY or OPENAI_API_KEY');
+  if (config.deepseekApiKey) return 'deepseek';
+  if (config.glmApiKey) return 'glm';
+  throw new Error('Set ANTHROPIC_API_KEY, OPENAI_API_KEY, DEEPSEEK_API_KEY, or GLM_API_KEY');
+}
+
+function throwMissingModel(envVar: string): never {
+  throw new Error(`${envVar} (or its role-specific override) is required when its provider is selected — no default model is assumed.`);
 }
 
 /**
@@ -64,6 +76,10 @@ export function resolveProvider(): 'anthropic' | 'openai' {
  * plan/session notes on this. A blanket *_MODEL override (e.g. for cheap
  * end-to-end testing before trusting this against a real project) still
  * works — it's just the fallback both roles share unless overridden.
+ *
+ * DeepSeek/GLM have no DEFAULT_*_MODEL constant (unlike Anthropic/OpenAI) —
+ * model IDs on both move fast, so the third precedence tier is a clear
+ * thrown error instead of a silently stale default.
  */
 export function resolveModel(role: 'executor' | 'validator'): string {
   const provider = resolveProvider();
@@ -71,6 +87,14 @@ export function resolveModel(role: 'executor' | 'validator'): string {
     const roleOverride = optional(role === 'executor' ? 'ANTHROPIC_EXECUTOR_MODEL' : 'ANTHROPIC_VALIDATOR_MODEL');
     return roleOverride ?? optional('ANTHROPIC_MODEL') ?? DEFAULT_ANTHROPIC_MODEL;
   }
-  const roleOverride = optional(role === 'executor' ? 'OPENAI_EXECUTOR_MODEL' : 'OPENAI_VALIDATOR_MODEL');
-  return roleOverride ?? optional('OPENAI_MODEL') ?? DEFAULT_OPENAI_MODEL;
+  if (provider === 'openai') {
+    const roleOverride = optional(role === 'executor' ? 'OPENAI_EXECUTOR_MODEL' : 'OPENAI_VALIDATOR_MODEL');
+    return roleOverride ?? optional('OPENAI_MODEL') ?? DEFAULT_OPENAI_MODEL;
+  }
+  if (provider === 'deepseek') {
+    const roleOverride = optional(role === 'executor' ? 'DEEPSEEK_EXECUTOR_MODEL' : 'DEEPSEEK_VALIDATOR_MODEL');
+    return roleOverride ?? optional('DEEPSEEK_MODEL') ?? throwMissingModel('DEEPSEEK_MODEL');
+  }
+  const roleOverride = optional(role === 'executor' ? 'GLM_EXECUTOR_MODEL' : 'GLM_VALIDATOR_MODEL');
+  return roleOverride ?? optional('GLM_MODEL') ?? throwMissingModel('GLM_MODEL');
 }
