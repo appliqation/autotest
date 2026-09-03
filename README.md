@@ -61,6 +61,38 @@ Exactly one of `--test-case-uuid` / `--scenario-id` / `--test-set-id` is require
 
 `--dry-run` is the recommended default for your first run against a real project — it computes real verdicts but suppresses the actual Appliqation writeback. Drop it once you trust the result. `--coverage` (`always` / `on-script-absence` / `sampled:N` / `external`) controls when this agentic pass runs alongside your existing deterministic Playwright pipeline in scenario/test-set mode; `--json`/`--ci` give a structured summary and a CI-friendly exit code.
 
+## CLI reference
+
+`appliqation-autotest judge [options]`
+
+**Scope — exactly one required:**
+
+| Option | Description |
+|---|---|
+| `--test-case-uuid <uuid>` | One test case to judge. `scenario_id` is always derived from it — `--scenario-id` is not accepted alongside it. |
+| `--scenario-id <id>` | An entire scenario, agentic pair judged per TC per the coverage policy. |
+| `--test-set-id <id>` | An entire test set (can span multiple scenarios, the common regression/sanity/smoke shape) — gets exactly one shared run covering every TC in it. `--run-id` is not supported in this mode. |
+
+**Required:**
+
+| Option | Description |
+|---|---|
+| `--environment <name>` | Environment name — its URL is what the browser navigates to. |
+
+**Optional:**
+
+| Option | Description |
+|---|---|
+| `--run-id <id>` | Reuse an existing run instead of creating one. Not available in test-set mode. |
+| `--role <name>` | Authenticate the executor as this role before navigating, using the Playwright storageState `appq-auth-setup` writes. Omit for ungated projects. |
+| `--coverage <policy>` | `always` \| `on-script-absence` (default) \| `on-failure-or-absence` \| `sampled:N` \| `external` — only meaningful in whole-scenario/test-set mode; decides when the agentic pair runs alongside the deterministic canonical-script pipeline. |
+| `--test-type <ui\|api>` | Force `ui` (browser) or `api` (`http_request`) execution for every TC this invocation touches. Omit and each TC's own tag decides instead. |
+| `--poll-timeout-ms <ms>` | Whole-scenario/test-set mode: how long to wait for the deterministic path to settle before reporting. Defaults to `POLL_TIMEOUT_MS`. |
+| `--mandatory-image-check` | Fetch and attach every step's screenshot to the validator unconditionally, instead of leaving it to the model's own `view_screenshot` judgment. Real cost/reliability tradeoff, not free. |
+| `--dry-run` | Compute verdicts normally but suppress the actual `update_run_results`/`create_defect` calls — logs what would have been sent instead. |
+| `--json` | Print the final result as a single JSON object instead of a human-readable table. |
+| `--ci` | Shorthand for `--json`. |
+
 ## Configuration
 
 Copy `.env.example` to `.env`. Requires `APPQ_API_KEY` and one of `ANTHROPIC_API_KEY`/`OPENAI_API_KEY`. Separate executor/validator model overrides are supported — a cheaper model for judging captured evidence is a reasonable choice even when the executor needs a stronger one for open-ended browsing.
