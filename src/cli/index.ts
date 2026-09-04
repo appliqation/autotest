@@ -121,8 +121,8 @@ program
       "them, the validator never sees the executor's own conversation, only what it explicitly submitted as " +
       'evidence. In whole-scenario and test-set mode, a coverage policy decides per TC whether the agentic pair ' +
       'runs at all, alongside whatever the deterministic canonical-script pipeline already does automatically; ' +
-      'the report then covers every TC either way. A test set can span multiple scenarios, so that mode resolves ' +
-      'one run per distinct scenario represented rather than one overall. project_id and url are always derived, never ' +
+      'the report then covers every TC either way. A test set can span multiple scenarios but gets exactly one ' +
+      'shared run covering all of them. project_id and url are always derived, never ' +
       'accepted as separate inputs — a caller-supplied value diverging from the real one would either be ' +
       'silently wrong (url, no server-side check) or rejected late (project_id, appq validates it against the ' +
       "scenario) — deriving instead of asking avoids both failure modes, the same reason MCP tools themselves " +
@@ -138,9 +138,10 @@ program
   .option(
     '--test-set-id <id>',
     'judge every test case in this test set instead of one TC or one scenario — the common CI case (regression/' +
-      'sanity/smoke suites). A test set can span multiple scenarios; each distinct scenario gets its own run, ' +
-      'created/reused independently, since appq\'s create_run is inherently scenario-scoped. Mutually exclusive ' +
-      'with --test-case-uuid/--scenario-id; --run-id is not supported here (no single run to reuse).',
+      'sanity/smoke suites). A test set can span multiple scenarios, but gets exactly ONE run covering all of ' +
+      'them (appq\'s create_run accepts test_set_id directly, the same mechanism the "Run Test Set" UI flow ' +
+      'uses). Mutually exclusive with --test-case-uuid/--scenario-id; --run-id is not supported here — a test ' +
+      'set always gets a fresh run.',
   )
   .requiredOption(
     '--environment <name>',
